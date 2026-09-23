@@ -12,9 +12,7 @@
       "version": "3.12"
     },
     "ghcr.io/devcontainers/features/java:1": {
-      "version": "21",
       "installMaven": true,
-      "mavenVersion": "3.9.6"
     }
   },
   "forwardPorts": [4321, 5001, 5002, 5003, 5004, 5005, 5006],
