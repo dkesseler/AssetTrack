@@ -1,0 +1,152 @@
+name: Promote learner branches
+
+# Atomic, all-or-nothing promotion of the mutable start-of-module-N aliases and
+# the immutable acc-<version>/start-of-module-N version tags.
+#
+# Promotion rebuilds every buildable branch from the *merged* (now-canonical)
+# delta store on the default branch — it does not depend on ephemeral regen/*
+# staging refs surviving. Everything is built and verified first; only if the
+# entire affected chain validates are the refs pushed in a single atomic push.
+#
+# The human-approval gate is enforced twice: (1) the regen PR must be reviewed
+# and merged to reach here, and (2) the `production-branches` environment should
+# be configured with required reviewers so the push step waits for sign-off.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'course-build/deltas/**'
+      - 'course-build/manifest.json'
+  workflow_dispatch:
+    inputs:
+      acc_version:
+        description: 'Immutable tag version (YYYY-MM). Blank = current month.'
+        required: false
+        default: ''
+      from_module:
+        description: 'Lowest module to promote (promotes this..last buildable). Blank = all.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-branches
+  cancel-in-progress: false   # never interrupt an in-flight promotion
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production-branches   # configure required reviewers here for the approval gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Configure git identity
+        run: |
+          git config user.name "acc-course-bot"
+          git config user.email "acc-course-bot@users.noreply.github.com"
+      - name: Ensure base commit present
+        run: git fetch --no-tags origin "$(node -e "console.log(require('./course-build/manifest.json').base.sha)")" || true
+
+      - name: Resolve version + build all buildable branches into staging
+        id: build
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.acc_version }}"
+          if [ -z "$VERSION" ]; then VERSION="$(date -u +%Y-%m)"; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          DID="promote-${{ github.run_id }}"
+          echo "dispatch_id=$DID" >> "$GITHUB_OUTPUT"
+          # Deterministic verify first (fails the job if any tree/ancestry is off).
+          node course-build/scripts/build-branches.mjs --check
+          # Build staging refs for the full buildable range.
+          node course-build/scripts/build-branches.mjs --dispatch-id "$DID"
+          # Emit the list of start branches that got staged.
+          node -e "const m=require('./course-build/manifest.json');const b=m.modules.filter(x=>x.status==='backfilled'&&(x.patches||[]).length).map(x=>x.startBranch);require('fs').writeFileSync(process.env.GITHUB_OUTPUT,'branches='+JSON.stringify(b)+'\n',{flag:'a'})"
+
+      - name: Assemble atomic refspecs (aliases + immutable tags)
+        id: refs
+        env:
+          # Pass step outputs / inputs through the env block so GitHub sets them
+          # verbatim — never interpolate JSON into the shell script, where the
+          # quotes get stripped and JSON.parse fails.
+          BRANCHES: ${{ steps.build.outputs.branches }}
+          VERSION: ${{ steps.build.outputs.version }}
+          DID: ${{ steps.build.outputs.dispatch_id }}
+          FROM: ${{ github.event.inputs.from_module }}
+        run: |
+          set -euo pipefail
+          # Make current remote alias tips available so we only move a learner branch when
+          # its content actually changed -- avoids gratuitously rewriting unchanged public
+          # start-of-module-* branches to new commit shas on every promotion.
+          # No "|| true": a wildcard that matches nothing (e.g. the first-ever promotion,
+          # before any start branch exists) already exits 0, so the only thing || true would
+          # hide is a real failure (network/auth/remote down). Swallowing that would leave
+          # cur_tree empty for every branch and force-push ALL of them, so let it abort.
+          git fetch --no-tags origin "refs/heads/start-of-module-*:refs/remotes/origin/start-of-module-*"
+          REFSPECS=()
+          for start in $(node -e "console.log(JSON.parse(process.env.BRANCHES).join(' '))"); do
+            # start = start-of-module-NN ; module = NN-1
+            num="${start##*-}"; num="${num#0}"; mod=$(( num - 1 ))
+            if [ -n "$FROM" ] && [ "$mod" -lt "$FROM" ]; then
+              echo "skip $start (module $mod < from_module $FROM)"
+              continue
+            fi
+            staged="regen/${DID}/${start}"
+            sha="$(git rev-parse "$staged")"
+            staged_tree="$(git rev-parse "${staged}^{tree}")"
+
+            # Mutable alias: move it only when the built content differs from what the branch
+            # already points at (or the branch does not exist yet). Force, because promotion
+            # rebuilds commits (new commit shas even for identical trees).
+            cur_tree="$(git rev-parse --verify --quiet "refs/remotes/origin/${start}^{tree}" 2>/dev/null || true)"
+            if [ "$cur_tree" != "$staged_tree" ]; then
+              REFSPECS+=("+${sha}:refs/heads/${start}")
+              echo "alias ${start}: content changed -> ${staged_tree:0:12} (move)"
+            else
+              echo "alias ${start}: unchanged (${staged_tree:0:12}); leaving in place."
+            fi
+
+            # Immutable version tag: cut exactly once. Never overwrite an existing tag (that
+            # is what "immutable" means); skip it so re-running promotion is idempotent
+            # instead of aborting the whole job.
+            tag="acc-${VERSION}/${start}"
+            if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+              echo "tag ${tag}: already exists; leaving unchanged."
+            else
+              REFSPECS+=("${sha}:refs/tags/${tag}")
+              echo "tag ${tag}: creating at ${sha:0:12}."
+            fi
+          done
+          if [ "${#REFSPECS[@]}" -eq 0 ]; then
+            echo "Nothing to promote: all aliases current and all version tags present."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            : > /tmp/refspecs.txt
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${REFSPECS[@]}"
+          # persist for next step
+          printf '%s\n' "${REFSPECS[@]}" > /tmp/refspecs.txt
+
+      - name: Atomic push (all aliases + tags, or nothing)
+        if: steps.refs.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mapfile -t REFSPECS < /tmp/refspecs.txt
+          echo "Pushing ${#REFSPECS[@]} refs atomically:"
+          printf '  %s\n' "${REFSPECS[@]}"
+          git push --atomic origin "${REFSPECS[@]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Promotion" >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: \`${{ steps.build.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"

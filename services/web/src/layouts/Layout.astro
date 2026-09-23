@@ -1,0 +1,46 @@
+---
+import "../styles/app.css";
+const { title } = Astro.props as { title: string };
+const path = Astro.url.pathname;
+const links = [
+  { href: "/",            label: "Dashboard" },
+  { href: "/assets",      label: "Assets" },
+  { href: "/employees",   label: "Employees" },
+  { href: "/assignments", label: "Assignments" },
+  { href: "/reports",     label: "Reports" },
+];
+function isActive(href: string): boolean {
+  return href === "/" ? path === "/" : path.startsWith(href);
+}
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} — AssetTrack</title>
+  </head>
+  <body class="d-flex flex-column min-vh-100">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+      <div class="container">
+        <a class="navbar-brand fw-semibold" href="/">AssetTrack</a>
+        <span class="navbar-text text-secondary me-auto small">Contoso Industries</span>
+        <ul class="navbar-nav">
+          {links.map(l => (
+            <li class="nav-item">
+              <a class={"nav-link" + (isActive(l.href) ? " active" : "")}
+                 aria-current={isActive(l.href) ? "page" : undefined}
+                 href={l.href}>{l.label}</a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </nav>
+    <main class="container py-4">
+      <slot />
+    </main>
+    <footer class="text-center text-secondary small py-3 border-top mt-auto">
+      Sample application — for course exercises only
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: juliamuiruri4 <40116776+juliamuiruri4@users.noreply.github.com>
+Date: Mon, 6 Jul 2026 08:57:31 +0000
+Subject: [PATCH 1/4] adding copilot instructions
+
+---
+ .github/copilot-instructions.md               | 79 +++++++++++++++++++
+ .../astro-frontend.instructions.md            | 15 ++++
+ .github/instructions/dotnet.instructions.md   | 19 +++++
+ .github/instructions/java.instructions.md     | 11 +++
+ .github/instructions/python.instructions.md   | 21 +++++
+ 5 files changed, 145 insertions(+)
+ create mode 100644 .github/copilot-instructions.md
+ create mode 100644 .github/instructions/astro-frontend.instructions.md
+ create mode 100644 .github/instructions/dotnet.instructions.md
+ create mode 100644 .github/instructions/java.instructions.md
+ create mode 100644 .github/instructions/python.instructions.md
+
+diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md
+new file mode 100644
+index 0000000..aedf6f3
+--- /dev/null
++++ b/.github/copilot-instructions.md
+@@ -0,0 +1,79 @@
++# Copilot instructions for AssetTrack
++
++## Big picture
++
++AssetTrack is a teaching-oriented polyglot microservices app for internal asset and employee assignment tracking.
++
++- `web` is an Astro SSR frontend and BFF; it calls backend services server-side only.
++- Most backend services own a local SQLite database.
++- `reporting-svc` reads live data from other services and does not own a primary DB.
++- `auth-svc` and `audit-svc` are intentionally legacy Java 11 / Spring Boot 2.7 services.
++- All service-to-service traffic is REST/JSON.
++
++## Commands
++
++### Root
++
++```bash
++npm run dev
++npm run dev:verbose
++npm run install:all
++docker compose up --build
++```
++
++### `web`
++
++```bash
++npm --prefix services/web run dev
++npm --prefix services/web run build
++npm --prefix services/web run preview
++npm --prefix services/web run start
++```
++
++### `assets-svc`
++
++```bash
++dotnet run
++dotnet test services/assets-svc/Tests/AssetsService.Tests.csproj
++dotnet test services/assets-svc/Tests/AssetsService.Tests.csproj --filter FullyQualifiedName~AssetsDbTests
++```
++
++### `workforce-svc`
++
++```bash
++mvn spring-boot:run
++mvn test
++mvn -Dtest=WorkforceApplicationTests test
++```
++
++### `reporting-svc`
++
++```bash
++pip install -e ".[dev]"
++uvicorn app.main:app --reload --port 8080
++ruff check .
++```
++
++### `notifications-svc`
++
++```bash
++pip install -e services/notifications-svc
++uvicorn app.main:app --reload --port 8080
++```
++
++### `audit-svc` and `auth-svc`
++
++```bash
++mvn spring-boot:run
++```
++
++## Conventions
++
++- Keep Astro data fetching on the server; use `services/web/src/lib/api/client.ts` and env vars rather than browser-side service calls.
++- `web` resolves service URLs from `process.env`, not `import.meta.env`, so container runtime values work correctly.
++- `assets-svc` is a .NET 8 minimal-API app; startup initializes the SQLite schema/seed data and exposes Swagger.
++- Spring services use a thin controller/service/repository split; business rules live in services, not controllers.
++- `workforce-svc` keeps the one-active-assignment-per-asset rule, but some other rules are intentionally left unenforced for exercises.
++- Python services organize FastAPI routers under `app/routers/`; `reporting-svc` uses routers plus module-level service URLs.
++- Legacy Java services use raw JDBC and seeded SQLite data in `DataInit`; their insecure patterns are intentional teaching targets.
++- Several gaps are deliberate course exercises; check `README.md`, service READMEs, and `exercises.md` before "fixing" something that is meant to stay broken.
+diff --git a/.github/instructions/astro-frontend.instructions.md b/.github/instructions/astro-frontend.instructions.md
+new file mode 100644
+index 0000000..237152b
+--- /dev/null
++++ b/.github/instructions/astro-frontend.instructions.md
+@@ -0,0 +1,15 @@
++---
++applyTo: "services/web/src/**/*.{astro,ts,tsx}"
++description: This file describes instructions for the Astro + TypeScript frontend in the web service.
++---
++
++- Keep the frontend SSR-first: fetch data in Astro frontmatter/server code, and use React islands only for genuinely interactive UI.
++- Route all backend access through `services/web/src/lib/api/*`; do not call backend services directly from the browser.
++- Use strict TypeScript with explicit types at module boundaries, no `any`, and no unsafe casts unless there is a clear boundary and a brief justification.
++- Prefer small, composable components and helpers over large page files; keep UI, data shaping, and request logic separated.
++- Preserve accessibility by default: use semantic HTML, correct heading order, labeled controls, keyboard-friendly interactions, and `aria-*` only when native elements are insufficient.
++- Keep styling consistent with Bootstrap 5 and `services/web/src/styles/app.css`; reuse existing utilities and patterns before adding custom CSS.
++- Favor server-side data shaping and parallel requests where possible; keep error, empty, and loading states explicit and user-visible.
++- Keep React islands lightweight and avoid hydration unless the interaction needs client-side state or events.
++- Prefer minimal dependencies; use existing Astro, React, and Bootstrap capabilities before introducing new packages.
++- Make incremental, easy-to-review changes that preserve current behavior, keep public markup stable when practical, and update focused tests or coverage when behavior changes.
+diff --git a/.github/instructions/dotnet.instructions.md b/.github/instructions/dotnet.instructions.md
+new file mode 100644
+index 0000000..9041490
+--- /dev/null
++++ b/.github/instructions/dotnet.instructions.md
+@@ -0,0 +1,19 @@
++---
++applyTo: "services/assets-svc/**/*.cs"
++description: This file describes instructions for the .NET 8 assets service code style and engineering practices for the project.
++---
++
++- Follow standard C# naming conventions — Use PascalCase for types, methods, and properties, camelCase for locals and parameters, UPPER_SNAKE_CASE only for constants when needed, and keep file names aligned to the primary type they define.
++- Use file-scoped namespaces that match the `Contoso.Assets` root namespace (for example, `namespace Contoso.Assets.Endpoints;`) and keep related types in the appropriate `Data/`, `Endpoints/`, or `Models/` folder.
++- Honor nullable reference types everywhere — Mark optional reference values with `?`, initialize non-null properties explicitly, and do not use the null-forgiving operator (`!`) unless there is no better option and the reason is documented in a comment.
++- Keep minimal API wiring in endpoint extension classes — Add related routes through `public static` extension methods on `IEndpointRouteBuilder`, organize them with `MapGroup(...)`, and keep request handlers as private static methods that return `IResult`.
++- Return HTTP results intentionally — Use `Results.Ok(...)`, `Results.Created(...)`, `Results.NotFound()`, and `Results.NoContent()` as appropriate, and prefer explicit not-found and no-content responses over letting endpoint exceptions escape.
++- Use Dapper with parameterized SQL only — Pass values through anonymous objects or `DynamicParameters`, use `@param` placeholders, and never concatenate user-controlled input into SQL statements.
++- Open SQLite connections through `AssetsDb` with `using var conn = db.Open();` so every handler gets a fresh `SqliteConnection` and disposes it promptly.
++- Keep persistence concerns in `AssetsDb` and endpoint/query code — Use `AssetsDb` for connection management and initialization, and preserve the existing Dapper + `Microsoft.Data.Sqlite` approach instead of introducing Entity Framework or other ORM abstractions.
++- Keep read models and write/input models separate — Place models under `Models/`, use dedicated input types like `AssetCreate` for request bodies, and keep optional request fields as nullable `string?` values when the API accepts missing data.
++- Preserve course-exercise gaps unless the task explicitly changes them — `AssetCreate` intentionally allows incomplete or invalid input today, so do not add blanket rules or generated code that assume validation is always required.
++- Register dependencies with `builder.Services` and resolve them from DI — Prefer singleton registration for stateless infrastructure such as `AssetsDb`, and do not instantiate shared dependencies directly inside handlers when DI can provide them.
++- Read runtime configuration from `Environment.GetEnvironmentVariable(...)` with sensible fallback defaults, including `ASSETS_DB_PATH` for the SQLite file location, and avoid hard-coded environment-specific paths or service URLs.
++- Keep `Program.cs` compatible with the existing host/test setup — Preserve Swagger registration, keep startup focused on wiring and initialization, and retain `public partial class Program { }` at the bottom so `WebApplicationFactory`-based tests continue to work.
++- Keep changes incremental and dependency-light — Make focused updates that fit the minimal API structure already in place, avoid adding new NuGet packages unless the task requires them, and validate changes with `dotnet test services/assets-svc/Tests/AssetsService.Tests.csproj` when behavior is affected.
+diff --git a/.github/instructions/java.instructions.md b/.github/instructions/java.instructions.md
+new file mode 100644
+index 0000000..b6a08c1
+--- /dev/null
++++ b/.github/instructions/java.instructions.md
+@@ -0,0 +1,11 @@
++---
++applyTo: "services/**/*.java"
++description: This file describes instructions for Java code style and best practices for the project.
++---
++
++- Follow standard naming conventions — Classes in PascalCase, methods/variables in camelCase, constants in UPPER_SNAKE_CASE, packages in lowercase. 
++- Program to interfaces, not implementations — Declare variables/parameters using the most general interface type (e.g., List<String> list = new ArrayList<>()) to enable flexibility and loose coupling. 
++- Favor composition over inheritance — Prefer delegating to component objects rather than extending classes; inheritance breaks encapsulation and creates fragile hierarchies. 
++- Handle exceptions properly — Never swallow exceptions with empty catch blocks, use checked exceptions for recoverable conditions and runtime exceptions for programming errors, and always clean up resources with try-with-resources.
++- Adhere to SOLID principles — Especially Single Responsibility (one reason to change per class) and Dependency Inversion (depend on abstractions); foundational for maintainable OO design. 
++- Make classes immutable whenever possible — Mark fields private final, avoid setters, and don't expose internal mutable state; immutable objects are inherently thread-safe and easier to reason about. 
+\ No newline at end of file
+diff --git a/.github/instructions/python.instructions.md b/.github/instructions/python.instructions.md
+new file mode 100644
+index 0000000..40d9b3a
+--- /dev/null
++++ b/.github/instructions/python.instructions.md
+@@ -0,0 +1,21 @@
++---
++applyTo: "services/**/*.py"
++description: This file describes instructions for Python 3.12 FastAPI services in reporting-svc and notifications-svc.
++---
++
++- Use Python 3.12 type hints on every function signature, including return types; prefer `dict[str, Any]` for open-ended JSON, `list[T]` for typed collections, and `str | None` for optional strings.
++- Add a short module docstring that explains the service or module purpose, and keep public route/helper names descriptive and domain-focused.
++- For services with multiple concerns, keep `app/main.py` thin (app creation, config constants, router inclusion, health check only) and put domain routes under `app/routers/` with one `APIRouter(prefix="/...", tags=["..."])` per concern.
++- Before changing anything that looks like a bug or gap, check `exercises.md` — many rough edges (`app/legacy/format_helpers.py`, the CSV import error handling, missing validation) are deliberate course exercises. Change them only when the current task is the exercise that targets them.
++- Read service URLs, database paths, and other runtime configuration with `os.getenv("VAR", "default")`; never hard-code hostnames or filesystem paths and never use `os.environ["VAR"]` for required config.
++- For outbound calls, use `httpx.AsyncClient` inside an `async with` block, set an explicit timeout, and keep each request/response flow small and readable.
++- When an upstream HTTP call fails, catch the specific `httpx.HTTPError` around the failing operation and re-raise `HTTPException(status_code=502, detail=...) from e` so FastAPI returns a clear gateway-style error with the original exception chain preserved.
++- Raise `HTTPException` with appropriate status codes from route handlers, and keep `try`/`except` blocks tight so unrelated code is not accidentally masked.
++- In SQLite-backed code, use `pathlib.Path` for DB paths, initialize schema in the existing startup pattern, open connections with `with sqlite3.connect(...) as conn`, and keep SQL operations local and explicit.
++- Always use parameterized SQLite queries with `?` placeholders; never build SQL with f-strings, `%` formatting, or string concatenation.
++- Use the standard `logging` module with `logging.basicConfig(...)`, keep a module logger, and emit operational messages with `log.info(...)`, `log.warning(...)`, or `log.error(...)` instead of `print(...)`.
++- Prefer modern Python idioms: f-strings, comprehensions where they improve clarity, `with` blocks for files and network resources, and dataclasses or Pydantic models for structured data instead of ad-hoc dict juggling when the schema is stable.
++- Avoid older or less safe patterns such as `%`-style string formatting, `os.path.join`, bare `open()` without a context manager, and broad exception handling that hides the failing line.
++- Keep health checks and existing startup hooks intact: each service should continue to expose `@app.get("/health")`, and notifications-style services should preserve the `_init_db()` initialization flow unless the task explicitly changes startup behavior.
++- Use pytest and pytest-asyncio for tests, run `pytest` from the service directory for Python service changes, and run `ruff check .` before submitting updates; if you add or change dependencies, update the relevant `pyproject.toml` in the same change.
++- Make incremental, reviewable updates that match the existing FastAPI style, preserve current API behavior unless requirements change, and prefer existing standard-library/framework features over adding new packages.

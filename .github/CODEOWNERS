@@ -1,0 +1,6 @@
+# Code owners for the AssetTrack (Contoso Industries) sample.
+#
+# NOTE: The team below is a PLACEHOLDER. It is expected to be finalized when this
+# repository migrates into the github-samples organization, at which point the
+# real maintainers team should be substituted here.
+* @github-samples/contoso-inventory-maintainers

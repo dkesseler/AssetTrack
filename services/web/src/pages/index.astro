@@ -1,0 +1,102 @@
+---
+import Layout from "../layouts/Layout.astro";
+import StatusBadge from "../components/StatusBadge.astro";
+import { statsByStatus } from "../lib/api/assets";
+import { listEmployees } from "../lib/api/workforce";
+import { utilization } from "../lib/api/reporting";
+
+let assetStats: Record<string, number> = {};
+let employeeCount = 0;
+let activeCount = 0;
+let utilizationPct = 0;
+let errors: string[] = [];
+
+try {
+  assetStats = await statsByStatus();
+} catch (e: any) {
+  errors.push(`assets-svc: ${e.message}`);
+}
+
+try {
+  const employees = await listEmployees();
+  employeeCount = employees.length;
+  activeCount = employees.filter(e => e.active).length;
+} catch (e: any) {
+  errors.push(`workforce-svc: ${e.message}`);
+}
+
+try {
+  const u = await utilization();
+  utilizationPct = u.utilization_pct;
+} catch (e: any) {
+  errors.push(`reporting-svc: ${e.message}`);
+}
+
+const totalAssets = Object.values(assetStats).reduce((a, b) => a + b, 0);
+const statusOrder = ["available", "assigned", "retired", "lost"];
+---
+<Layout title="Dashboard">
+  <h1 class="h3 mb-4">Dashboard</h1>
+
+  {errors.length > 0 && (
+    <div class="alert alert-warning">
+      <p class="fw-semibold mb-1">Some backend services aren't responding:</p>
+      <ul class="mb-0">
+        {errors.map(e => <li>{e}</li>)}
+      </ul>
+    </div>
+  )}
+
+  <div class="row g-3 mb-4">
+    <div class="col-sm-6 col-lg-3">
+      <a href="/assets" class="card shadow-sm h-100 text-decoration-none text-reset dashboard-card">
+        <div class="card-body">
+          <div class="text-secondary small">Total assets</div>
+          <div class="display-6 fw-semibold">{totalAssets}</div>
+        </div>
+      </a>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <a href="/employees" class="card shadow-sm h-100 text-decoration-none text-reset dashboard-card">
+        <div class="card-body">
+          <div class="text-secondary small">Employees</div>
+          <div class="display-6 fw-semibold">{employeeCount}</div>
+          <div class="text-secondary small">{activeCount} active</div>
+        </div>
+      </a>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <a href="/reports" class="card shadow-sm h-100 text-decoration-none text-reset dashboard-card">
+        <div class="card-body">
+          <div class="text-secondary small">Utilization</div>
+          <div class="display-6 fw-semibold">{utilizationPct}%</div>
+        </div>
+      </a>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <a href="/assets?status=lost" class="card shadow-sm h-100 text-decoration-none text-reset dashboard-card">
+        <div class="card-body">
+          <div class="text-secondary small">Lost / retired</div>
+          <div class="display-6 fw-semibold">{(assetStats.lost ?? 0) + (assetStats.retired ?? 0)}</div>
+        </div>
+      </a>
+    </div>
+  </div>
+
+  <h2 class="h5 mb-3">Assets by status</h2>
+  <div class="card shadow-sm">
+    <ul class="list-group list-group-flush">
+      {statusOrder.filter(s => assetStats[s]).map(s => (
+        <a href={`/assets?status=${s}`} class="list-group-item list-group-item-action d-flex align-items-center justify-content-between">
+          <StatusBadge status={s} />
+          <span class="font-monospace">{assetStats[s]}</span>
+        </a>
+      ))}
+    </ul>
+  </div>
+</Layout>
+
+<style>
+  .dashboard-card { transition: transform 0.1s ease-in-out, box-shadow 0.1s ease-in-out; }
+  .dashboard-card:hover { transform: translateY(-2px); box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.1) !important; }
+</style>

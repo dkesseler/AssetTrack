@@ -1,0 +1,22 @@
+[project]
+name = "reporting-svc"
+version = "0.1.0"
+description = "AssetTrack reports + CSV bulk import (Python FastAPI)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.3",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "python-multipart==0.0.32",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.3",
+]

@@ -1,0 +1,163 @@
+name: Validate learner branches
+
+# Validation gate for the ACC start-of-module-N delta store. Runs on any PR that
+# touches the delta store / course-build tooling, and is reusable (workflow_call)
+# so the dispatch receiver can gate a regen PR on the same checks.
+
+on:
+  pull_request:
+    paths:
+      - 'course-build/**'
+      - '.github/workflows/validate-branches.yml'
+  workflow_dispatch:
+    inputs:
+      dispatch_id:
+        description: 'Staging namespace to validate (regen/<id>/...)'
+        required: false
+        default: 'ci-manual'
+      ref:
+        description: 'Git ref (branch/SHA) to validate'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      dispatch_id:
+        description: 'Staging namespace to validate'
+        required: false
+        type: string
+        default: 'ci-call'
+      ref:
+        description: 'Git ref (branch/SHA) to validate. Defaults to the caller ref.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-branches-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast, deterministic checks: deltas apply cleanly onto acc-base, each cumulative
+  # tree matches manifest.expectedTreeSha, expected .github assets present, ancestry
+  # linear. Also emits the buildable start-branch matrix for the heavy job.
+  verify-deltas:
+    runs-on: ubuntu-latest
+    outputs:
+      branches: ${{ steps.matrix.outputs.branches }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history + base commit for git am
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Ensure base commit present
+        run: git fetch --no-tags origin "$(node -e "console.log(require('./course-build/manifest.json').base.sha)")" || true
+      - name: Configure git identity (for git am)
+        run: |
+          git config user.name "acc-course-bot"
+          git config user.email "acc-course-bot@users.noreply.github.com"
+      - name: Deterministic delta check (trees, assets, ancestry)
+        run: node course-build/scripts/build-branches.mjs --check
+      - name: Self-test (classification + path detection)
+        run: node course-build/scripts/selftest.mjs
+      - name: Compute buildable start-branch matrix
+        id: matrix
+        run: |
+          branches=$(node -e "const m=require('./course-build/manifest.json');const b=m.modules.filter(x=>x.status==='backfilled'&&(x.patches||[]).length).map(x=>x.startBranch);process.stdout.write(JSON.stringify(b))")
+          echo "branches=$branches" >> "$GITHUB_OUTPUT"
+          echo "Buildable: $branches"
+
+  # Secret scan of the delta store and everything the built branches would contain.
+  # Runs the gitleaks OSS binary directly rather than gitleaks/gitleaks-action@v2,
+  # which requires a paid GITLEAKS_LICENSE secret for organization repositories.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
+      - name: gitleaks (delta store + course-build)
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          # SHA256 of gitleaks_${VERSION}_linux_x64.tar.gz from the upstream
+          # gitleaks_${VERSION}_checksums.txt release asset. Bump both together on upgrade.
+          GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" -o /tmp/gitleaks.tar.gz
+          # Verify integrity before extracting/executing (pinned supply-chain check).
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+          # Scan the full commit history (fetch-depth: 0). Exits non-zero on any finding.
+          /tmp/gitleaks git . --redact --verbose
+
+  # Heavy gate: build each buildable learner branch from deltas and run the suites
+  # that exist in that cumulative state (web / .NET / Java / Python / Playwright),
+  # plus the no-uncommitted-files-after-setup assertion.
+  build-and-test:
+    needs: verify-deltas
+    if: needs.verify-deltas.outputs.branches != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        start_branch: ${{ fromJSON(needs.verify-deltas.outputs.branches) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Ensure base commit present
+        run: git fetch --no-tags origin "$(node -e "console.log(require('./course-build/manifest.json').base.sha)")" || true
+      - name: Configure git identity (for git am)
+        run: |
+          git config user.name "acc-course-bot"
+          git config user.email "acc-course-bot@users.noreply.github.com"
+      - name: Provision /data volume for service DBs
+        # The services default their SQLite databases to /data/<svc>.db (overridable via
+        # *_DB_PATH), where /data is a mounted volume under docker compose. Bare `mvn test`
+        # / `dotnet test` / `pytest` on the runner have no such volume, so the Spring
+        # services abort at startup with "path to '/data/...': '/data' does not exist".
+        # Create it writable to mirror the runtime contract without touching learner-branch
+        # app files (which would change the delta-store tree SHAs verify-deltas asserts).
+        run: sudo mkdir -p /data && sudo chmod 777 /data
+      - name: Build + validate ${{ matrix.start_branch }}
+        run: bash course-build/scripts/validate-branch.sh "${{ matrix.start_branch }}"
+        env:
+          DISPATCH_ID: ci-${{ github.run_id }}
+
+  # Aggregate result used as the required status check / workflow_call output.
+  summary:
+    needs: [verify-deltas, secret-scan, build-and-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any gate failed
+        run: |
+          echo "verify-deltas: ${{ needs.verify-deltas.result }}"
+          echo "secret-scan:   ${{ needs.secret-scan.result }}"
+          echo "build-and-test:${{ needs.build-and-test.result }}"
+          test "${{ needs.verify-deltas.result }}" = "success"
+          test "${{ needs.secret-scan.result }}" = "success"
+          test "${{ needs.build-and-test.result }}" = "success"

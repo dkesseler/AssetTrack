@@ -1,0 +1,553 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acc-course-bot <acc-course-bot@users.noreply.github.com>
+Date: Wed, 1 Jan 2020 00:00:00 +0000
+Subject: [PATCH] feat(module-05): add QR/barcode support + QA agent, research,
+ plan
+
+Module 5 seed: Playwright MCP-backed Quality assurance agent, /research report, /plan, and the barcode/QR feature across assets-svc (.NET) and web (Astro) with tests.
+---
+ .github/agents/qa.agent.md                    | 27 ++++++
+ docs/plans/qr-support.md                      | 39 ++++++++
+ reports/qr-code-research.md                   | 43 +++++++++
+ services/assets-svc/AssetsService.csproj      |  1 +
+ services/assets-svc/Data/AssetsDb.cs          | 17 +++-
+ services/assets-svc/Data/QrPayload.cs         | 29 ++++++
+ .../assets-svc/Endpoints/AssetEndpoints.cs    | 28 +++++-
+ services/assets-svc/Models/Asset.cs           |  1 +
+ services/assets-svc/Tests/AssetQrTests.cs     | 94 +++++++++++++++++++
+ .../assets-svc/Tests/TestParallelization.cs   |  6 ++
+ services/web/src/lib/api/assets.ts            | 11 +++
+ services/web/src/pages/assets/[id].astro      | 30 +++++-
+ services/web/src/styles/app.css               | 12 +++
+ tests/playwright/qr-code.spec.ts              | 19 ++++
+ 14 files changed, 354 insertions(+), 3 deletions(-)
+ create mode 100644 .github/agents/qa.agent.md
+ create mode 100644 docs/plans/qr-support.md
+ create mode 100644 reports/qr-code-research.md
+ create mode 100644 services/assets-svc/Data/QrPayload.cs
+ create mode 100644 services/assets-svc/Tests/AssetQrTests.cs
+ create mode 100644 services/assets-svc/Tests/TestParallelization.cs
+ create mode 100644 tests/playwright/qr-code.spec.ts
+
+diff --git a/.github/agents/qa.agent.md b/.github/agents/qa.agent.md
+new file mode 100644
+index 0000000..d3bb4c8
+--- /dev/null
++++ b/.github/agents/qa.agent.md
+@@ -0,0 +1,27 @@
++---
++description: 'Quality gate for a feature branch: verifies the promised behavior exists, is tested, matches the plan, and is accessible.'
++name: 'Quality assurance'
++tools: [read, execute, search, agent, playwright]
++---
++
++# Quality assurance
++
++You are a quality assurance gate for a feature branch. You start from a clean context and know only what the feature was *supposed* to do — so you naively explore, confirm, and report, rather than assuming any work was completed. You never take the author's word that something works; you verify it.
++
++## Checklist (run in order)
++
++1. **Read the research and plan.** Locate and read the feature's research report (e.g. `reports/*.md`) and its plan (e.g. `docs/plans/*.md`). Derive the concrete, checkable claims the feature is supposed to satisfy.
++2. **Confirm the behavior exists in the running app.** Use the **Playwright MCP server** to open the running application (default `http://localhost:4321`) and confirm the new functionality is actually present and works in the UI. If the app is not running, say so and stop treating this check as passed.
++3. **Run the tests.** Run the project's test suites for every layer the feature touches (.NET `dotnet test`, Python `pytest`, web `npm run test:e2e`, Java `mvn test` including `scripts/with-java11` where relevant). Report pass/fail with the actual command output, not a summary you assume.
++4. **Review the diff against the plan.** Review the code changes on the current branch and compare them to the plan: is every wave implemented, is anything out of scope, are there gaps between what was planned and what was built?
++5. **Confirm accessibility.** Hand any new or changed UI to the **Accessibility Expert** agent and treat a failed or missing confirmation as a finding — do not sign off on accessibility yourself.
++
++## Reporting
++
++Finish with a single report that states:
++
++- **Covered** — what you verified and how (with evidence: URLs opened, commands run, output seen).
++- **Couldn't verify** — anything you could not check and why (e.g. app not running, a suite that wouldn't execute in this environment).
++- **Gaps** — every discrepancy between the plan and the result, each as an actionable item.
++
++Do not mark the gate green unless every checklist item passed or is explicitly and defensibly waived. A gate that hides what it couldn't check is worse than no gate.
+diff --git a/docs/plans/qr-support.md b/docs/plans/qr-support.md
+new file mode 100644
+index 0000000..1d3f179
+--- /dev/null
++++ b/docs/plans/qr-support.md
+@@ -0,0 +1,39 @@
++# Plan — QR code support for AssetTrack
++
++> Library: `Net.Codecrete.QrCodeGenerator` (see `reports/qr-code-research.md`). The QR payload is a deep-link URL to the asset's detail page. Base URL for the course environment: `http://localhost:4321`.
++
++## Goal
++
++Every asset carries a scannable QR code that deep-links to its detail page, generated server-side and surfaced in the UI. Scanning is a later phase; this feature is generation + display only.
++
++## Waves
++
++The work splits into independent waves that meet only at the `GET /assets/{id}/qr` contract, so the backend and frontend can proceed in parallel.
++
++### Wave 1 — Schema & payload (`services/assets-svc`)
++
++- Add a `qr_payload TEXT` column to the `assets` table.
++- Populate the payload **on write**: after inserting an asset, set `qr_payload = {WEB_BASE_URL}/assets/{id}`. The id only exists after the insert, so this is a second write — not part of the INSERT.
++- **Backfill** existing rows (including seed data) on startup: `UPDATE assets SET qr_payload = base || id WHERE qr_payload IS NULL OR qr_payload = ''`.
++- Add a migration so databases created before this column get it via `ALTER TABLE`.
++
++### Wave 2 — API (`services/assets-svc`)
++
++- Expose the payload as JSON on the existing asset representation (`qrPayload`), for flexibility.
++- Add `GET /assets/{id}/qr` that reads the stored payload and returns a server-side rendered **SVG** (`image/svg+xml`); 404 when the asset does not exist.
++
++### Wave 3 — UI (`services/web`)
++
++- Thread `qrPayload` through the TypeScript `Asset` model.
++- On the asset detail page (`src/pages/assets/[id].astro`), fetch the SVG server-side and inline it in a "QR code" card, as an **accessible image** (`role="img"` + descriptive `aria-label`), with a caption showing the target URL. Degrade gracefully if the image can't be fetched.
++
++## Tests
++
++- **assets-svc (xUnit):** payload is populated on create and ends with `/assets/{id}`; seed rows are backfilled; `GET /assets/{id}/qr` returns an SVG; missing asset returns 404.
++- **web (Playwright):** the asset detail page renders the QR card and an accessible QR image whose inline SVG is visible.
++
++## Reviewer notes / gaps caught in rubber-duck critique
++
++- **Deep-link needs the id, which doesn't exist until after insert.** Naively "generate on insert" is wrong. Resolved by populating in a second write and backfilling pre-existing rows — otherwise assets created before this feature (and the seed data) would have no code.
++- **Container safety:** the library must be pure-managed (no `System.Drawing`), or it would pass locally and fail in the Linux container.
++- **Accessibility:** the QR is meaningful content, not decorative — it needs a text alternative, so it is exposed as `role="img"` with an `aria-label` and a visible caption rather than a bare inline `<svg>`.
+diff --git a/reports/qr-code-research.md b/reports/qr-code-research.md
+new file mode 100644
+index 0000000..64d3870
+--- /dev/null
++++ b/reports/qr-code-research.md
+@@ -0,0 +1,43 @@
++# QR code generation library research — `assets-svc`
++
++> Research artifact for the QR support feature. Captures the options considered and why we chose one, so future contributors understand the decision.
++
++## Decision
++
++Use **[`Net.Codecrete.QrCodeGenerator`](https://www.nuget.org/packages/Net.Codecrete.QrCodeGenerator)** to generate QR codes server-side in `services/assets-svc` (.NET 8).
++
++## Use case & constraints
++
++- **Use case:** generate a QR image for an asset on the server. The payload is a deep-link URL to the asset's detail page.
++- **Runtime:** the service runs in a **Linux container**. The library must **not** depend on native OS graphics (e.g. `System.Drawing.Common`, which is unsupported on non-Windows and needs native `libgdiplus`).
++- **Decision criteria:** permissive license, active maintenance, a **pure-managed** rendering path, and **SVG** output (crisp at any size, no rasterization dependency).
++
++## Options compared
++
++| Library | License | Maintenance | Pure-managed rendering | Output formats |
++| ------- | ------- | ----------- | ---------------------- | -------------- |
++| **Net.Codecrete.QrCodeGenerator** | MIT | Active | **Yes** — emits SVG string / module matrix, no drawing deps | SVG, module bitmap (bring-your-own raster) |
++| QRCoder | MIT | Active | Mixed — `SvgQRCode` is pure-managed, but the popular `PngByteQRCode` path and `System.Drawing` renderers pull native/Windows deps | PNG, SVG, others |
++| ZXing.Net | Apache-2.0 | Active | Encoding is managed, but image rendering historically leans on `System.Drawing`/`SkiaSharp` bindings | Many (via renderer packages) |
++
++## Why `Net.Codecrete.QrCodeGenerator`
++
++- **No native graphics dependency.** It produces an SVG string directly from the QR module matrix, so nothing touches `System.Drawing` or a native imaging stack — it renders identically on a developer laptop and in the Linux container.
++- **SVG is the right output.** The asset detail page scales the code responsively; a vector avoids the blurriness and byte overhead of a rasterized PNG.
++- **Permissive license (MIT)** compatible with this project, and **actively maintained**.
++
++## Integration sketch (`services/assets-svc`)
++
++1. Add the package reference to `AssetsService.csproj`.
++2. Store the deep-link payload per asset (`qr_payload` column), populated on write and backfilled for existing rows.
++3. Add `GET /assets/{id}/qr` that reads the stored payload and returns `QrCode.EncodeText(payload, Ecc.Medium).ToSvgString(4)` with content type `image/svg+xml`.
++
++## Sources
++
++- Net.Codecrete.QrCodeGenerator — project & NuGet: <https://github.com/manuelbl/QrCodeGenerator>, <https://www.nuget.org/packages/Net.Codecrete.QrCodeGenerator>
++- QRCoder — <https://github.com/codebude/QRCoder>
++- ZXing.Net — <https://github.com/micjahn/ZXing.Net>
++- .NET on why `System.Drawing.Common` is Windows-only — <https://learn.microsoft.com/dotnet/core/compatibility/core-libraries/6.0/system-drawing-common-windows-only>
++
++> [!NOTE]
++> This report is evidence for the decision, not the decision itself. If a reviewer prefers a different option that still satisfies the pure-managed + SVG + permissive-license constraints, the integration sketch is the only part that changes.
+diff --git a/services/assets-svc/AssetsService.csproj b/services/assets-svc/AssetsService.csproj
+index 8a74b57..40c8bcd 100644
+--- a/services/assets-svc/AssetsService.csproj
++++ b/services/assets-svc/AssetsService.csproj
+@@ -9,6 +9,7 @@
+   <ItemGroup>
+     <PackageReference Include="Dapper" Version="2.1.79" />
+     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
++    <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="2.0.5" />
+     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.3" />
+   </ItemGroup>
+   <ItemGroup>
+diff --git a/services/assets-svc/Data/AssetsDb.cs b/services/assets-svc/Data/AssetsDb.cs
+index ccd2dcf..41ee7e5 100644
+--- a/services/assets-svc/Data/AssetsDb.cs
++++ b/services/assets-svc/Data/AssetsDb.cs
+@@ -38,14 +38,29 @@ public class AssetsDb
+                 purchase_date TEXT,
+                 warranty_expiry TEXT,
+                 status TEXT NOT NULL,
+-                notes TEXT
++                notes TEXT,
++                qr_payload TEXT
+             );
+         """);
+ 
++        // Migration: add qr_payload to databases created before QR support existed.
++        var columns = conn.Query<string>("SELECT name FROM pragma_table_info('assets');");
++        if (!columns.Contains("qr_payload"))
++        {
++            conn.Execute("ALTER TABLE assets ADD COLUMN qr_payload TEXT;");
++        }
++
+         var count = conn.ExecuteScalar<long>("SELECT COUNT(*) FROM assets;");
+         if (count == 0)
+         {
+             SeedData.Apply(conn);
+         }
++
++        // Backfill the deep-link payload for any rows missing it (seed rows and
++        // assets that already existed before this column was added). The payload
++        // needs the asset id, which only exists after the row is inserted.
++        conn.Execute(
++            $"UPDATE assets SET qr_payload = @base || id WHERE qr_payload IS NULL OR qr_payload = '';",
++            new { @base = QrPayload.DeepLinkBase() });
+     }
+ }
+diff --git a/services/assets-svc/Data/QrPayload.cs b/services/assets-svc/Data/QrPayload.cs
+new file mode 100644
+index 0000000..61e942d
+--- /dev/null
++++ b/services/assets-svc/Data/QrPayload.cs
+@@ -0,0 +1,29 @@
++using Net.Codecrete.QrCodeGenerator;
++
++namespace Contoso.Assets.Data;
++
++/// <summary>
++/// Builds the QR deep-link payload for an asset and renders it as a pure-managed
++/// SVG (no native System.Drawing dependency, so it runs unchanged in the Linux
++/// container). The payload is a deep link to the asset's detail page in the web
++/// app; the scanning phase lives in a later milestone.
++/// </summary>
++public static class QrPayload
++{
++    // The web base URL is fixed for the course environment but overridable so the
++    // same code works if the app is hosted elsewhere.
++    public static string WebBaseUrl() =>
++        Environment.GetEnvironmentVariable("WEB_BASE_URL")?.TrimEnd('/') ?? "http://localhost:4321";
++
++    // Base fragment stored per row; the asset id is appended to form the payload.
++    public static string DeepLinkBase() => $"{WebBaseUrl()}/assets/";
++
++    public static string For(long id) => $"{DeepLinkBase()}{id}";
++
++    /// <summary>Render a payload string as an SVG QR code (border = 4 modules).</summary>
++    public static string ToSvg(string payload)
++    {
++        var qr = QrCode.EncodeText(payload, QrCode.Ecc.Medium);
++        return qr.ToSvgString(4);
++    }
++}
+diff --git a/services/assets-svc/Endpoints/AssetEndpoints.cs b/services/assets-svc/Endpoints/AssetEndpoints.cs
+index 629b308..9e7c863 100644
+--- a/services/assets-svc/Endpoints/AssetEndpoints.cs
++++ b/services/assets-svc/Endpoints/AssetEndpoints.cs
+@@ -13,6 +13,7 @@ public static class AssetEndpoints
+         group.MapGet("/", GetAll);
+         group.MapGet("/search", Search);
+         group.MapGet("/{id:int}", GetById);
++        group.MapGet("/{id:int}/qr", GetQr);
+         group.MapGet("/by-tag/{tag}", GetByTag);
+         group.MapPost("/", Create);
+         group.MapPut("/{id:int}", Update);
+@@ -30,7 +31,8 @@ public static class AssetEndpoints
+                purchase_date   AS PurchaseDate,
+                warranty_expiry AS WarrantyExpiry,
+                status          AS Status,
+-               notes           AS Notes
++               notes           AS Notes,
++               qr_payload      AS QrPayload
+         FROM assets
+     """;
+ 
+@@ -66,6 +68,26 @@ public static class AssetEndpoints
+         return item is null ? Results.NotFound() : Results.Ok(item);
+     }
+ 
++    // Render the asset's stored QR payload as an SVG image. The payload is a
++    // deep link to the asset detail page; rendering is pure-managed so it works
++    // unchanged inside the Linux container.
++    private static IResult GetQr(AssetsDb db, int id)
++    {
++        using var conn = db.Open();
++        var payload = conn.QueryFirstOrDefault<string?>(
++            "SELECT qr_payload FROM assets WHERE id = @id;", new { id });
++        if (payload is null)
++        {
++            return Results.NotFound();
++        }
++        // Backstop: older rows may predate the backfill.
++        if (string.IsNullOrEmpty(payload))
++        {
++            payload = QrPayload.For(id);
++        }
++        return Results.Text(QrPayload.ToSvg(payload), "image/svg+xml");
++    }
++
+     // NOTE: deliberately no input validation here. This is the target of the
+     // "Add input validation to the asset create form" course exercise. Empty
+     // strings, missing required fields, and nonsensical dates are all accepted.
+@@ -79,6 +101,10 @@ public static class AssetEndpoints
+                     @PurchaseDate, @WarrantyExpiry, @Status, @Notes);
+             SELECT last_insert_rowid();
+         """, input);
++        // The QR payload is a deep link that needs the id, which only exists after
++        // the insert — so populate it in a second write.
++        conn.Execute("UPDATE assets SET qr_payload = @payload WHERE id = @id;",
++            new { payload = QrPayload.For(id), id });
+         return Results.Created($"/assets/{id}", new { id });
+     }
+ 
+diff --git a/services/assets-svc/Models/Asset.cs b/services/assets-svc/Models/Asset.cs
+index f482750..550fe87 100644
+--- a/services/assets-svc/Models/Asset.cs
++++ b/services/assets-svc/Models/Asset.cs
+@@ -14,6 +14,7 @@ public class Asset
+     public string? WarrantyExpiry { get; set; }
+     public string Status { get; set; } = "";
+     public string? Notes { get; set; }
++    public string? QrPayload { get; set; }
+ }
+ 
+ public class AssetCreate
+diff --git a/services/assets-svc/Tests/AssetQrTests.cs b/services/assets-svc/Tests/AssetQrTests.cs
+new file mode 100644
+index 0000000..7bcf9d5
+--- /dev/null
++++ b/services/assets-svc/Tests/AssetQrTests.cs
+@@ -0,0 +1,94 @@
++using System.Net;
++using System.Net.Http.Json;
++using Contoso.Assets.Models;
++using Microsoft.AspNetCore.Mvc.Testing;
++using Xunit;
++
++namespace Contoso.Assets.Tests;
++
++/// <summary>
++/// Tests for the QR code feature: the deep-link payload is populated on create
++/// and backfilled for seed rows, and GET /assets/{id}/qr renders an SVG.
++/// </summary>
++public class AssetQrTests : IDisposable
++{
++    private readonly WebApplicationFactory<Program> _factory;
++    private readonly HttpClient _client;
++    private readonly string _dbPath;
++
++    public AssetQrTests()
++    {
++        _dbPath = Path.Combine(Path.GetTempPath(), $"assets-qr-test-{Guid.NewGuid():N}.db");
++        Environment.SetEnvironmentVariable("ASSETS_DB_PATH", _dbPath);
++        _factory = new WebApplicationFactory<Program>()
++            .WithWebHostBuilder(builder =>
++            {
++                builder.UseSetting("ASSETS_DB_PATH", _dbPath);
++                Environment.SetEnvironmentVariable("ASSETS_DB_PATH", _dbPath);
++            });
++        _client = _factory.CreateClient();
++    }
++
++    public void Dispose()
++    {
++        _client.Dispose();
++        _factory.Dispose();
++        if (File.Exists(_dbPath)) File.Delete(_dbPath);
++    }
++
++    [Fact]
++    public async Task Create_PopulatesQrPayload_WithDeepLinkContainingId()
++    {
++        var newAsset = new AssetCreate
++        {
++            AssetTag = "QR-001", AssetType = "Laptop", Manufacturer = "Dell",
++            Model = "XPS 13", Status = "available"
++        };
++
++        var create = await _client.PostAsJsonAsync("/assets", newAsset);
++        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
++        var created = await create.Content.ReadFromJsonAsync<Dictionary<string, long>>();
++        var id = created!["id"];
++
++        var asset = await _client.GetFromJsonAsync<Asset>($"/assets/{id}");
++        Assert.NotNull(asset);
++        Assert.False(string.IsNullOrEmpty(asset!.QrPayload));
++        Assert.EndsWith($"/assets/{id}", asset.QrPayload);
++    }
++
++    [Fact]
++    public async Task SeededAssets_HaveBackfilledQrPayload()
++    {
++        // Seed data is applied on first initialize; every row should carry a payload.
++        var assets = await _client.GetFromJsonAsync<List<Asset>>("/assets");
++        Assert.NotNull(assets);
++        Assert.NotEmpty(assets!);
++        Assert.All(assets!, a =>
++        {
++            Assert.False(string.IsNullOrEmpty(a.QrPayload));
++            Assert.EndsWith($"/assets/{a.Id}", a.QrPayload!);
++        });
++    }
++
++    [Fact]
++    public async Task GetQr_ReturnsSvgImage()
++    {
++        var assets = await _client.GetFromJsonAsync<List<Asset>>("/assets");
++        var id = assets![0].Id;
++
++        var res = await _client.GetAsync($"/assets/{id}/qr");
++        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
++        Assert.Equal("image/svg+xml", res.Content.Headers.ContentType?.MediaType);
++
++        var svg = await res.Content.ReadAsStringAsync();
++        Assert.Contains("<svg", svg);
++        Assert.Contains("</svg>", svg);
++    }
++
++    [Fact]
++    public async Task GetQr_ForMissingAsset_Returns404()
++    {
++        var res = await _client.GetAsync("/assets/999999/qr");
++        Assert.Equal(HttpStatusCode.NotFound, res.StatusCode);
++    }
++}
+diff --git a/services/assets-svc/Tests/TestParallelization.cs b/services/assets-svc/Tests/TestParallelization.cs
+new file mode 100644
+index 0000000..fdcfcd6
+--- /dev/null
++++ b/services/assets-svc/Tests/TestParallelization.cs
+@@ -0,0 +1,6 @@
++// The endpoint integration tests spin up WebApplicationFactory instances that
++// read ASSETS_DB_PATH from a process-global environment variable. Running test
++// classes in parallel races on that variable and causes SQLite write contention,
++// so disable cross-class parallelization. Methods within a class already run
++// sequentially.
++[assembly: Xunit.CollectionBehavior(DisableTestParallelization = true)]
+diff --git a/services/web/src/lib/api/assets.ts b/services/web/src/lib/api/assets.ts
+index c951d4b..24db879 100644
+--- a/services/web/src/lib/api/assets.ts
++++ b/services/web/src/lib/api/assets.ts
+@@ -11,6 +11,7 @@ export interface Asset {
+   warrantyExpiry: string | null;
+   status: string;
+   notes: string | null;
++  qrPayload: string | null;
+ }
+ 
+ export function listAssets(): Promise<Asset[]> {
+@@ -43,3 +44,13 @@ export function createAsset(body: Partial<Asset>): Promise<{ id: number }> {
+ export function statsByStatus(): Promise<Record<string, number>> {
+   return apiFetch<Record<string, number>>(`${SERVICE_URLS.assets}/assets/stats/by-status`);
+ }
++
++// Fetch the server-rendered QR code for an asset as an SVG string. Returned as
++// raw markup (not JSON) so it can be inlined server-side into the detail page.
++export async function getAssetQrSvg(id: number): Promise<string> {
++  const res = await fetch(`${SERVICE_URLS.assets}/assets/${id}/qr`);
++  if (!res.ok) {
++    throw new Error(`${res.status} ${res.statusText} fetching QR for asset ${id}`);
++  }
++  return res.text();
++}
+diff --git a/services/web/src/pages/assets/[id].astro b/services/web/src/pages/assets/[id].astro
+index 7a7fe61..166551f 100644
+--- a/services/web/src/pages/assets/[id].astro
++++ b/services/web/src/pages/assets/[id].astro
+@@ -1,17 +1,24 @@
+ ---
+ import Layout from "../../layouts/Layout.astro";
+ import StatusBadge from "../../components/StatusBadge.astro";
+-import { getAsset } from "../../lib/api/assets";
++import { getAsset, getAssetQrSvg } from "../../lib/api/assets";
+ import { listAssignments } from "../../lib/api/workforce";
+ 
+ const id = Number(Astro.params.id);
+ let asset: Awaited<ReturnType<typeof getAsset>> | null = null;
+ let assignments: Awaited<ReturnType<typeof listAssignments>> = [];
++let qrSvg: string | null = null;
+ let error: string | null = null;
+ 
+ try {
+   asset = await getAsset(id);
+   assignments = await listAssignments({ assetId: id });
++  try {
++    qrSvg = await getAssetQrSvg(id);
++  } catch {
++    // The QR image is non-critical; the page still renders without it.
++    qrSvg = null;
++  }
+ } catch (e: any) {
+   error = e.message;
+ }
+@@ -37,6 +44,27 @@ try {
+         </div>
+       </div>
+ 
++      <div class="card shadow-sm mb-4">
++        <div class="card-body">
++          <h2 class="h6 mb-3">QR code</h2>
++          {qrSvg ? (
++            <figure class="mb-0">
++              <div
++                class="qr-code"
++                role="img"
++                aria-label={`QR code linking to the detail page for asset ${asset.assetTag}`}
++                set:html={qrSvg}
++              />
++              <figcaption class="text-secondary small mt-2">
++                Scan to open this asset. Links to <span class="font-monospace">{asset.qrPayload ?? `/assets/${asset.id}`}</span>.
++              </figcaption>
++            </figure>
++          ) : (
++            <p class="text-secondary mb-0">QR code is unavailable right now.</p>
++          )}
++        </div>
++      </div>
++
+       <h2 class="h5 mb-2">Assignment history</h2>
+       <div class="card shadow-sm">
+         <div class="table-responsive">
+diff --git a/services/web/src/styles/app.css b/services/web/src/styles/app.css
+index 5878f74..0c0139a 100644
+--- a/services/web/src/styles/app.css
++++ b/services/web/src/styles/app.css
+@@ -37,3 +37,15 @@ main {
+ .badge.bg-primary  { background-color: #1d4ed8 !important; color: #fff !important; }
+ .badge.bg-danger   { background-color: #991b1b !important; color: #fff !important; }
+ .badge.bg-secondary{ background-color: #374151 !important; color: #fff !important; }
++
++/* Constrain the inline server-rendered QR code SVG to a sensible display size. */
++.qr-code {
++  display: inline-block;
++  width: 180px;
++  max-width: 100%;
++}
++.qr-code svg {
++  width: 100%;
++  height: auto;
++  display: block;
++}
+diff --git a/tests/playwright/qr-code.spec.ts b/tests/playwright/qr-code.spec.ts
+new file mode 100644
+index 0000000..dee69bc
+--- /dev/null
++++ b/tests/playwright/qr-code.spec.ts
+@@ -0,0 +1,19 @@
++import { test, expect } from '@playwright/test';
++
++// QR support: the asset detail page renders a server-generated QR code as an
++// accessible image. Requires the full stack running (web + assets-svc).
++test.describe('AssetTrack - QR code feature', () => {
++  test('asset detail page shows an accessible QR code', async ({ page }) => {
++    // Land on the assets list and open the first asset's detail page.
++    await page.goto('/assets');
++    const firstAsset = page.locator('tbody a[href^="/assets/"]').first();
++    await firstAsset.click();
++
++    // The QR card heading and the accessible QR image are present.
++    await expect(page.getByRole('heading', { name: /qr code/i })).toBeVisible();
++    const qr = page.getByRole('img', { name: /qr code linking to the detail page/i });
++    await expect(qr).toBeVisible();
++    // The inline SVG actually rendered.
++    await expect(qr.locator('svg')).toBeVisible();
++  });
++});

@@ -1,0 +1,72 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import StatusBadge from "../../components/StatusBadge.astro";
+import { getAsset } from "../../lib/api/assets";
+import { listAssignments } from "../../lib/api/workforce";
+
+const id = Number(Astro.params.id);
+let asset: Awaited<ReturnType<typeof getAsset>> | null = null;
+let assignments: Awaited<ReturnType<typeof listAssignments>> = [];
+let error: string | null = null;
+
+try {
+  asset = await getAsset(id);
+  assignments = await listAssignments({ assetId: id });
+} catch (e: any) {
+  error = e.message;
+}
+---
+<Layout title={asset ? asset.assetTag : "Asset"}>
+  {error && <div class="alert alert-danger">{error}</div>}
+
+  {asset && (
+    <>
+      <div class="d-flex align-items-baseline gap-3 mb-3">
+        <h1 class="h3 font-monospace mb-0">{asset.assetTag}</h1>
+        <StatusBadge status={asset.status} />
+      </div>
+      <div class="card shadow-sm mb-4">
+        <div class="card-body kv-grid">
+          <div class="label">Type</div><div>{asset.assetType}</div>
+          <div class="label">Manufacturer</div><div>{asset.manufacturer}</div>
+          <div class="label">Model</div><div>{asset.model}</div>
+          <div class="label">Serial number</div><div class="font-monospace">{asset.serialNumber ?? "—"}</div>
+          <div class="label">Purchase date</div><div>{asset.purchaseDate ?? "—"}</div>
+          <div class="label">Warranty expiry</div><div>{asset.warrantyExpiry ?? "—"}</div>
+          <div class="label">Notes</div><div>{asset.notes ?? "—"}</div>
+        </div>
+      </div>
+
+      <h2 class="h5 mb-2">Assignment history</h2>
+      <div class="card shadow-sm">
+        <div class="table-responsive">
+          <table class="table align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Assigned</th>
+                <th>Returned</th>
+                <th>Employee</th>
+                <th>By</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assignments.map(a => (
+                <tr>
+                  <td>{a.assignedDate}</td>
+                  <td>{a.returnedDate ?? <em class="text-secondary">active</em>}</td>
+                  <td><a class="link-secondary" href={`/employees/${a.employeeId}`}>#{a.employeeId}</a></td>
+                  <td class="text-secondary">{a.assignedBy ?? "—"}</td>
+                  <td class="text-secondary">{a.notes ?? "—"}</td>
+                </tr>
+              ))}
+              {assignments.length === 0 && (
+                <tr><td colspan="5" class="text-center text-secondary py-4">No assignments yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )}
+</Layout>

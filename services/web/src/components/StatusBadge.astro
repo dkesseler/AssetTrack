@@ -1,0 +1,17 @@
+---
+// StatusBadge.astro — colored Bootstrap badge per asset status.
+// INTENTIONAL BUG (course exercise #8): the colors for "retired" and "lost"
+// are wrong. "retired" should be a neutral gray (bg-secondary) and "lost"
+// should be red (bg-danger).
+const { status } = Astro.props as { status: string };
+
+const variantByStatus: Record<string, string> = {
+  available: "bg-success",
+  assigned:  "bg-primary",
+  retired:   "bg-success",   // BUG: should be bg-secondary
+  lost:      "bg-primary",   // BUG: should be bg-danger
+};
+
+const variant = variantByStatus[status] ?? "bg-secondary";
+---
+<span class={`badge rounded-pill ${variant}`}>{status}</span>

@@ -1,0 +1,595 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: acc-course-bot <acc-course-bot@users.noreply.github.com>
+Date: Tue, 18 Aug 2026 13:58:56 -0700
+Subject: [PATCH] feat(module-06): modernize audit-svc + auth-svc to Spring
+ Boot 4.1 / Java 21
+
+Currency upgrade of the two lagging Java services from the CVE-clean but
+generation-behind Boot 3.5.16 / Java 17 baseline to the current Boot 4.1.0 /
+Java 21 stack, with baseline test suites.
+
+- audit-svc, auth-svc: parent 3.5.16 -> 4.1.0; java.version 17 -> 21; Dockerfiles
+  temurin 17 -> 21; pin jackson-bom (Jackson 3) 3.1.6 and log4j2 2.25.5 (Boot 4.1
+  natively resolves the vulnerable 3.1.4 / 2.25.4).
+- Jackson 3 (tools.jackson) is the Boot 4 default; audit-svc's Map/List responses
+  serialize with no source change.
+- auth-svc: jjwt 0.11.5 -> 0.12.7 with the fluent builder API in JwtIssuer, and
+  jjwt-jackson -> jjwt-gson so JWT (de)serialization stays off Jackson 2 (which
+  Boot 4 no longer manages).
+- Baseline tests (RestClient + @LocalServerPort, isolated temp SQLite) incl. an
+  auth token round-trip proving the gson serializer under Jackson 3.
+- Java LSP config, Java migrator agent, migration plan + playbook, extended test router.
+
+Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>
+---
+ .github/agents/java-migrator.agent.md         | 26 +++++++++
+ .github/hooks/scripts/test-router.sh          |  4 ++
+ .github/lsp.json                              | 11 ++++
+ docs/modernization/audit-svc-plan.md          | 40 +++++++++++++
+ docs/modernization/migration-playbook.md      | 30 ++++++++++
+ services/audit-svc/Dockerfile                 |  4 +-
+ services/audit-svc/pom.xml                    | 15 +++--
+ .../contoso/audit/AuditApplicationTests.java  | 12 ++++
+ .../contoso/audit/AuditControllerTest.java    | 45 +++++++++++++++
+ .../com/contoso/audit/AuditTestSupport.java   | 25 ++++++++
+ services/auth-svc/Dockerfile                  |  4 +-
+ services/auth-svc/pom.xml                     | 25 +++++---
+ .../main/java/com/contoso/auth/JwtIssuer.java | 12 ++--
+ .../contoso/auth/AuthApplicationTests.java    | 12 ++++
+ .../com/contoso/auth/AuthTestSupport.java     | 25 ++++++++
+ .../com/contoso/auth/TokenControllerTest.java | 57 +++++++++++++++++++
+ 16 files changed, 322 insertions(+), 25 deletions(-)
+ create mode 100644 .github/agents/java-migrator.agent.md
+ create mode 100644 .github/lsp.json
+ create mode 100644 docs/modernization/audit-svc-plan.md
+ create mode 100644 docs/modernization/migration-playbook.md
+ create mode 100644 services/audit-svc/src/test/java/com/contoso/audit/AuditApplicationTests.java
+ create mode 100644 services/audit-svc/src/test/java/com/contoso/audit/AuditControllerTest.java
+ create mode 100644 services/audit-svc/src/test/java/com/contoso/audit/AuditTestSupport.java
+ create mode 100644 services/auth-svc/src/test/java/com/contoso/auth/AuthApplicationTests.java
+ create mode 100644 services/auth-svc/src/test/java/com/contoso/auth/AuthTestSupport.java
+ create mode 100644 services/auth-svc/src/test/java/com/contoso/auth/TokenControllerTest.java
+
+diff --git a/.github/agents/java-migrator.agent.md b/.github/agents/java-migrator.agent.md
+new file mode 100644
+index 0000000..614990a
+--- /dev/null
++++ b/.github/agents/java-migrator.agent.md
+@@ -0,0 +1,26 @@
++---
++description: 'Modernizes one lagging Java service (and only its wiring) through a saved migration plan, one reviewable phase at a time.'
++name: 'Java migrator'
++tools: [read, edit, execute, search]
++---
++
++# Java migrator
++
++You bring **one** currency-lagging Java service current at a time by following a saved migration plan. You are scoped to the target service and the repository wiring that service depends on — **never** another service's source or the frontend. Your scope is an instruction you must hold to, not a sandbox: `edit` and `execute` can reach the whole repo, so stay inside the service you were asked to migrate.
++
++## Process (one phase at a time)
++
++1. **Read the plan.** Read `docs/modernization/audit-svc-plan.md` (or the plan named for the service you were asked to migrate). Treat its phases as the contract.
++2. **Confirm the safety net.** Run the service's Maven tests and confirm the baseline is green *before* changing anything. If there is no baseline suite, stop and say so.
++3. **Apply one phase, then stop.** Make only the changes for the current phase. After each phase, run the service's tests (`mvn verify` / `mvn test` from the service directory) and **stop for approval before starting the next phase.** Report the result of each phase; if a phase fails, report the failure and wait — do not press on.
++4. **Finish the job.** Once every phase is approved and green:
++   - Run the Playwright end-to-end suite (`npm run test:e2e`) as a final cross-system gate.
++   - Wire the modernized service into the repo's test router (`.github/hooks/scripts/test-router.sh`) so its tests run on edits.
++5. **Report.** End with a testing status report that names the target stack (Java 21 / Spring Boot 4.1.0) and confirms **both** layers passed on it: the service's unit/integration tests and the end-to-end suite. State clearly anything you could not verify.
++
++## Guardrails
++
++- Keep `JdbcTemplate` data access as-is during a framework bump. A move to Spring Data JPA is a separate project, not part of the upgrade.
++- Do not copy another service's dependencies (e.g. `workforce-svc`'s JPA/Hibernate) into the service you're migrating.
++- Boot 4 defaults to **Jackson 3** (`tools.jackson`) and no longer manages Jackson 2. Watch libraries that carry their own Jackson 2 (e.g. `jjwt-jackson`): prefer swapping to a Jackson-free serializer (`jjwt-gson`) over reintroducing an unmanaged Jackson 2. Pin BOM-managed libs (Jackson 3, Log4j2) to CVE-clean patches.
++- Read the diff at every gate. Validation between phases is where a fast upgrade catches its own mistakes.
+diff --git a/.github/hooks/scripts/test-router.sh b/.github/hooks/scripts/test-router.sh
+index fc8d073..c5ea1c0 100755
+--- a/.github/hooks/scripts/test-router.sh
++++ b/.github/hooks/scripts/test-router.sh
+@@ -20,6 +20,8 @@ stack_for_file() {
+   case "$1" in
+     services/assets-svc/*.cs) echo dotnet ;;
+     services/workforce-svc/*.java|services/workforce-svc/pom.xml) echo java ;;
++    services/audit-svc/*.java|services/audit-svc/pom.xml) echo audit ;;
++    services/auth-svc/*.java|services/auth-svc/pom.xml) echo auth ;;
+     services/reporting-svc/*.py|services/reporting-svc/pyproject.toml) echo python ;;
+     services/web/*.astro|services/web/*.ts|services/web/*.tsx|tests/playwright/*.ts|playwright.config.ts|package.json|package-lock.json) echo playwright ;;
+   esac
+@@ -29,6 +31,8 @@ run_stack() {
+   case "$1" in
+     dotnet) NAME=".NET"; COMMAND="dotnet test services/assets-svc/Tests/AssetsService.Tests.csproj" ;;
+     java) NAME="Java"; COMMAND="cd services/workforce-svc && mvn test --no-transfer-progress" ;;
++    audit) NAME="Java (audit-svc)"; COMMAND="cd services/audit-svc && mvn test --no-transfer-progress" ;;
++    auth) NAME="Java (auth-svc)"; COMMAND="cd services/auth-svc && mvn test --no-transfer-progress" ;;
+     python) NAME="Python"; COMMAND="cd services/reporting-svc && pytest" ;;
+     playwright) NAME="Web / Playwright"; COMMAND="npm run test:e2e" ;;
+     *) return 0 ;;
+diff --git a/.github/lsp.json b/.github/lsp.json
+new file mode 100644
+index 0000000..a064c1c
+--- /dev/null
++++ b/.github/lsp.json
+@@ -0,0 +1,11 @@
++{
++    "lspServers": {
++        "java": {
++            "command": "jdtls",
++            "args": [],
++            "fileExtensions": {
++                ".java": "java"
++            }
++        }
++    }
++}
+diff --git a/docs/modernization/audit-svc-plan.md b/docs/modernization/audit-svc-plan.md
+new file mode 100644
+index 0000000..c094c32
+--- /dev/null
++++ b/docs/modernization/audit-svc-plan.md
+@@ -0,0 +1,40 @@
++# Migration plan: `audit-svc` from Spring Boot 3.5.16 / Java 17 to Spring Boot 4.1.0 / Java 21
++
++## 1. Executive summary
++
++`audit-svc` is a small, append-only audit-log microservice currently on Spring Boot `3.5.16` / Java `17` — CVE-clean, but a Spring Boot generation and an LTS behind the team's current target. Its sibling `workforce-svc` runs the modern Boot 3.5 / Java 21 baseline, and the goal here is to bring `audit-svc` (and then `auth-svc`) fully current on **Spring Boot 4.1.0 / Java 21**. `audit-svc` uses only `spring-boot-starter-web`, `spring-boot-starter-jdbc`, raw `JdbcTemplate`, and `sqlite-jdbc` — no JPA, no Hibernate, and no direct Jackson use — so its migration surface is unusually narrow. The plan isolates the work into sequential phases — baseline safety net, toolchain alignment, framework bump, and dependency reconciliation — so each phase can be verified and rolled back independently.
++
++## 2. Target stack (pinned, CVE-clean today)
++
++| Coordinate | Before | After |
++| --- | --- | --- |
++| `spring-boot-starter-parent` | `3.5.16` | `4.1.0` |
++| `java.version` | `17` | `21` |
++| Jackson | 2.x (managed) | **Jackson 3** (`tools.jackson`), pinned `jackson-bom.version` = `3.1.6` |
++| Log4j2 API | `2.25.5` | `2.25.5` (pin retained: Boot 4.1.0 manages `2.25.4`, which is vulnerable) |
++| Dockerfile base | `eclipse-temurin-17` | `eclipse-temurin-21` |
++
++Boot 4.1.0 natively resolves Jackson 3 `3.1.4` and Log4j2 `2.25.4`, both of which carry a known CVE today; the two pins hold them at CVE-clean `3.1.6` / `2.25.5`. Spring Framework `7.0.8`, Tomcat `11.0.22`, snakeyaml, and HikariCP resolve clean at Boot 4.1.0 with no pin.
++
++## 3. Jackson 3 reconciliation
++
++Spring Boot 4 makes **Jackson 3** (package `tools.jackson`, immutable `JsonMapper`) the default and no longer manages Jackson 2. `audit-svc` returns `Map`/`List` from its `@RestController` methods and imports no Jackson types, so Spring MVC serializes them under Jackson 3 with **zero source changes**. (The coupling that does matter — a library carrying its own Jackson 2 — shows up in `auth-svc`, whose `jjwt-jackson` is swapped for `jjwt-gson`; see the playbook.)
++
++## 4. Phases
++
++- **Phase 0 — safety net.** Add `spring-boot-starter-test` (`test` scope) and characterization tests on the current 3.5.16 / 17 stack: a `@SpringBootTest` context-load test and `@LocalServerPort` + `RestClient` endpoint tests, pointed at an isolated temp SQLite DB. Confirm green before touching the runtime.
++- **Phase 1 — Java 17 → 21.** Bump `<java.version>` to `21` and the Dockerfile bases `temurin-17` → `temurin-21`. Re-run the Phase 0 tests.
++- **Phase 2 — Boot 3.5.16 → 4.1.0.** Bump the parent, add `<jackson-bom.version>3.1.6</jackson-bom.version>` and keep `<log4j2.version>2.25.5</log4j2.version>`. Note the Boot 4 test-API relocation (`TestRestTemplate`/`LocalServerPort` moved) — the Phase 0 tests already use `RestClient` to avoid it.
++- **Phase 3 — validate.** `mvn verify` green; confirm the resolved tree is OSV-clean; run the Playwright e2e suite as the cross-system gate.
++
++## 5. Risks
++
++| Risk | Mitigation |
++| --- | --- |
++| Boot 4.1.0 ships a vulnerable Jackson 3 (`3.1.4`) / Log4j2 (`2.25.4`) | Explicit `jackson-bom.version` / `log4j2.version` pins; re-scan the resolved tree with OSV. |
++| Boot 4 test-API relocation breaks characterization tests | Use `@LocalServerPort` + `RestClient` instead of the moved `TestRestTemplate`. |
++| Behavior drift across the major bump | Characterization tests written and green on 3.5.16 / 17 first, held constant across the bump. |
++
++## 6. Out of scope
++
++Introducing Spring Data JPA / Hibernate; fixing the intentional SQL-injection course-exercise code; SQLite pool hardening beyond test isolation. Each is tracked separately.
+diff --git a/docs/modernization/migration-playbook.md b/docs/modernization/migration-playbook.md
+new file mode 100644
+index 0000000..a2396ef
+--- /dev/null
++++ b/docs/modernization/migration-playbook.md
+@@ -0,0 +1,30 @@
++# Java modernization playbook
++
++> A reusable recipe for bringing an AssetTrack Java service current — from Spring Boot 3.5 / Java 17 to Spring Boot 4.1 / Java 21. Distilled from modernizing `audit-svc` and `auth-svc`. Use it with the `Java migrator` agent.
++
++## The loop
++
++Assess → Plan → Protect → Migrate → Validate → Document. An agent changes the speed of each step, not the need for it.
++
++## Recipe
++
++1. **Assess.** Confirm the current stack (`pom.xml` parent + `java.version`), the dependency surface, and how the service touches JSON. Boot 4 makes **Jackson 3** (`tools.jackson`) the default and no longer manages Jackson 2, so any library that carries its own Jackson 2 (e.g. `jjwt-jackson`) needs attention. Use the LSP (`.github/lsp.json` → `jdtls`) for precise caller/symbol lookups rather than text search.
++2. **Plan.** Target the current supported baseline (`spring-boot-starter-parent` `4.1.0`, `java.version` `21`) rather than a generic "4.x". Pin the BOM-managed libraries that ship a still-vulnerable patch to a CVE-clean one (`jackson-bom.version` → Jackson 3 `3.1.6`; `log4j2.version` → `2.25.5`). Keep the plan phased so each step is independently verifiable and revertible.
++3. **Protect — build the safety net first.** Add `spring-boot-starter-test` (`test` scope) and characterization tests *before* touching the framework: a `@SpringBootTest` context-load test, endpoint contract tests, and (for `auth-svc`) a token round-trip. Point them at an **isolated temporary SQLite database** (never `/data/*.db`). Note the Boot 4 test-API relocation: `TestRestTemplate` / `LocalServerPort` moved, so prefer `@LocalServerPort` + `RestClient`. Confirm green on the *old* (3.5 / 17) stack first.
++4. **Migrate in order.**
++   - Phase 1 — toolchain: `java.version` `17` → `21`; bump the Dockerfile base images `temurin-17` → `temurin-21`.
++   - Phase 2 — framework: `spring-boot-starter-parent` `3.5.16` → `4.1.0`; add the Jackson 3 / Log4j2 currency pins.
++   - Phase 3 — reconcile dependencies. Jackson 3 serializes the controllers' `Map`/`List` responses with **no** source change. For `jjwt`, bump `0.11.5` → `0.12.7` (the fluent builder API: `.issuer()/.subject()/.signWith(key, Jwts.SIG.RS256)`) and swap the serializer `jjwt-jackson` → `jjwt-gson` so JWT (de)serialization stays off Jackson 2, which Boot 4 no longer manages.
++5. **Validate after every phase.** `mvn verify` from the service directory; the same test count must stay green. Run the Playwright e2e suite as the final cross-system gate. Wire the service into `.github/hooks/scripts/test-router.sh` so edits trigger its tests.
++6. **Document.** Update this playbook and the `Java migrator` agent with anything the upgrade taught you, so the next service is a repeat rather than a fresh start.
++
++## Lessons from the two services
++
++- **`audit-svc`** was the clean case: raw `JdbcTemplate`, no direct Jackson use, three dependencies. Two `pom.xml` edits (parent + `java.version`) plus the currency pins and the test starter, and a Dockerfile bump. Jackson 3 handled its `Map`/`List` JSON with zero source changes. Tests green on 4.1.0 / 21.
++- **`auth-svc`** is where the second-service value showed up: it issues JWTs with `jjwt`. Boot 4 stops managing Jackson 2, so `jjwt-jackson` would drag in an old, vulnerable `jackson-databind`. The fix is two concrete moves — migrate `JwtIssuer` to the jjwt `0.12.x` fluent API, and swap `jjwt-jackson` → `jjwt-gson` to drop Jackson 2 entirely. A red test after the bump is the safety net doing its job. Tests green on 4.1.0 / 21.
++
++## Explicitly out of scope for a framework bump
++
++- Introducing Spring Data JPA / Hibernate (separate project, own branch).
++- Fixing the intentional SQL-injection course-exercise code in the repositories (track separately).
++- Hardening SQLite pool behavior beyond test isolation (evaluate under load, separately).
+diff --git a/services/audit-svc/Dockerfile b/services/audit-svc/Dockerfile
+index 04c9777..bd61f19 100644
+--- a/services/audit-svc/Dockerfile
++++ b/services/audit-svc/Dockerfile
+@@ -1,11 +1,11 @@
+-FROM maven:3.9-eclipse-temurin-17 AS build
++FROM maven:3.9-eclipse-temurin-21 AS build
+ WORKDIR /src
+ COPY pom.xml ./
+ RUN mvn -B -q dependency:go-offline
+ COPY src ./src
+ RUN mvn -B -q package -DskipTests
+ 
+-FROM eclipse-temurin:17-jre
++FROM eclipse-temurin:21-jre
+ WORKDIR /app
+ COPY --from=build /src/target/*.jar app.jar
+ EXPOSE 8080
+diff --git a/services/audit-svc/pom.xml b/services/audit-svc/pom.xml
+index d42ae42..3db1acb 100644
+--- a/services/audit-svc/pom.xml
++++ b/services/audit-svc/pom.xml
+@@ -5,7 +5,7 @@
+     <parent>
+         <groupId>org.springframework.boot</groupId>
+         <artifactId>spring-boot-starter-parent</artifactId>
+-        <version>3.5.16</version>
++        <version>4.1.0</version>
+         <relativePath/>
+     </parent>
+ 
+@@ -13,12 +13,12 @@
+     <artifactId>audit-svc</artifactId>
+     <version>0.1.0</version>
+     <name>audit-svc</name>
+-    <description>Append-only audit log (a generation behind: Spring Boot 3.5 / Java 17, due for a currency upgrade)</description>
++    <description>Append-only audit log (modernized: Spring Boot 4.1 / Java 21)</description>
+ 
+     <properties>
+-        <java.version>17</java.version>
+-        <!-- Currency pins: hold the BOM-managed Jackson 2.x and Log4j2 API on CVE-clean patches -->
+-        <jackson-bom.version>2.22.2</jackson-bom.version>
++        <java.version>21</java.version>
++        <!-- Currency pins: hold the BOM-managed Jackson 3 and Log4j2 API on CVE-clean patches -->
++        <jackson-bom.version>3.1.6</jackson-bom.version>
+         <log4j2.version>2.25.5</log4j2.version>
+     </properties>
+ 
+@@ -36,6 +36,11 @@
+             <artifactId>sqlite-jdbc</artifactId>
+             <version>3.45.3.0</version>
+         </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-test</artifactId>
++            <scope>test</scope>
++        </dependency>
+     </dependencies>
+ 
+     <build>
+diff --git a/services/audit-svc/src/test/java/com/contoso/audit/AuditApplicationTests.java b/services/audit-svc/src/test/java/com/contoso/audit/AuditApplicationTests.java
+new file mode 100644
+index 0000000..71f3029
+--- /dev/null
++++ b/services/audit-svc/src/test/java/com/contoso/audit/AuditApplicationTests.java
+@@ -0,0 +1,12 @@
++package com.contoso.audit;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.SpringBootTest;
++
++/** Verifies the Spring application context loads without errors. */
++@SpringBootTest
++class AuditApplicationTests extends AuditTestSupport {
++    @Test
++    void contextLoads() {
++    }
++}
+diff --git a/services/audit-svc/src/test/java/com/contoso/audit/AuditControllerTest.java b/services/audit-svc/src/test/java/com/contoso/audit/AuditControllerTest.java
+new file mode 100644
+index 0000000..4e46c51
+--- /dev/null
++++ b/services/audit-svc/src/test/java/com/contoso/audit/AuditControllerTest.java
+@@ -0,0 +1,45 @@
++package com.contoso.audit;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.boot.test.web.server.LocalServerPort;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.client.RestClient;
++
++import java.util.List;
++import java.util.Map;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
++class AuditControllerTest extends AuditTestSupport {
++
++    @LocalServerPort
++    int port;
++
++    private RestClient rest() {
++        return RestClient.create("http://localhost:" + port);
++    }
++
++    @Test
++    void health_returnsOk() {
++        ResponseEntity<Map> res = rest().get().uri("/health").retrieve().toEntity(Map.class);
++        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
++        assertThat(res.getBody()).containsEntry("status", "ok").containsEntry("service", "audit-svc");
++    }
++
++    @Test
++    void postThenGetEvents_roundTrips() {
++        Map<String, String> body = Map.of(
++                "actor", "tester", "action", "create", "entityType", "asset",
++                "entityId", "CON-TST-001", "details", "created in test");
++        ResponseEntity<Map> post = rest().post().uri("/events").body(body).retrieve().toEntity(Map.class);
++        assertThat(post.getStatusCode()).isEqualTo(HttpStatus.OK);
++        assertThat(((Number) post.getBody().get("id")).longValue()).isPositive();
++
++        ResponseEntity<List> list = rest().get().uri("/events").retrieve().toEntity(List.class);
++        assertThat(list.getStatusCode()).isEqualTo(HttpStatus.OK);
++        assertThat(list.getBody()).isNotEmpty();
++    }
++}
+diff --git a/services/audit-svc/src/test/java/com/contoso/audit/AuditTestSupport.java b/services/audit-svc/src/test/java/com/contoso/audit/AuditTestSupport.java
+new file mode 100644
+index 0000000..c82d730
+--- /dev/null
++++ b/services/audit-svc/src/test/java/com/contoso/audit/AuditTestSupport.java
+@@ -0,0 +1,25 @@
++package com.contoso.audit;
++
++import org.springframework.test.context.DynamicPropertyRegistry;
++import org.springframework.test.context.DynamicPropertySource;
++
++import java.nio.file.Path;
++
++/** Points the service at an isolated temp SQLite DB so tests never touch /data/audit.db. */
++abstract class AuditTestSupport {
++    static final Path DB = tempDb();
++
++    private static Path tempDb() {
++        try {
++            Path dir = java.nio.file.Files.createTempDirectory("audit-test");
++            return dir.resolve("audit.db");
++        } catch (Exception e) {
++            throw new RuntimeException(e);
++        }
++    }
++
++    @DynamicPropertySource
++    static void props(DynamicPropertyRegistry registry) {
++        registry.add("AUDIT_DB_PATH", DB::toString);
++    }
++}
+diff --git a/services/auth-svc/Dockerfile b/services/auth-svc/Dockerfile
+index 156b758..de5c9ec 100644
+--- a/services/auth-svc/Dockerfile
++++ b/services/auth-svc/Dockerfile
+@@ -1,11 +1,11 @@
+-FROM maven:3.9-eclipse-temurin-17 AS build
++FROM maven:3.9-eclipse-temurin-21 AS build
+ WORKDIR /src
+ COPY pom.xml ./
+ RUN mvn -B -q dependency:go-offline
+ COPY src ./src
+ RUN mvn -B -q package -DskipTests
+ 
+-FROM eclipse-temurin:17-jre
++FROM eclipse-temurin:21-jre
+ WORKDIR /app
+ COPY --from=build /src/target/*.jar app.jar
+ EXPOSE 8080
+diff --git a/services/auth-svc/pom.xml b/services/auth-svc/pom.xml
+index ded8899..578ff83 100644
+--- a/services/auth-svc/pom.xml
++++ b/services/auth-svc/pom.xml
+@@ -5,7 +5,7 @@
+     <parent>
+         <groupId>org.springframework.boot</groupId>
+         <artifactId>spring-boot-starter-parent</artifactId>
+-        <version>3.5.16</version>
++        <version>4.1.0</version>
+         <relativePath/>
+     </parent>
+ 
+@@ -13,13 +13,14 @@
+     <artifactId>auth-svc</artifactId>
+     <version>0.1.0</version>
+     <name>auth-svc</name>
+-    <description>JWT issuer + user lookup (a generation behind: Spring Boot 3.5 / Java 17, due for a currency upgrade)</description>
++    <description>JWT issuer + user lookup (modernized: Spring Boot 4.1 / Java 21)</description>
+ 
+     <properties>
+-        <java.version>17</java.version>
+-        <!-- Currency pins: hold the BOM-managed Jackson 2.x and Log4j2 API on CVE-clean patches -->
+-        <jackson-bom.version>2.22.2</jackson-bom.version>
++        <java.version>21</java.version>
++        <!-- Currency pins: hold the BOM-managed Jackson 3 and Log4j2 API on CVE-clean patches -->
++        <jackson-bom.version>3.1.6</jackson-bom.version>
+         <log4j2.version>2.25.5</log4j2.version>
++        <jjwt.version>0.12.7</jjwt.version>
+     </properties>
+ 
+     <dependencies>
+@@ -39,20 +40,26 @@
+         <dependency>
+             <groupId>io.jsonwebtoken</groupId>
+             <artifactId>jjwt-api</artifactId>
+-            <version>0.11.5</version>
++            <version>${jjwt.version}</version>
+         </dependency>
+         <dependency>
+             <groupId>io.jsonwebtoken</groupId>
+             <artifactId>jjwt-impl</artifactId>
+-            <version>0.11.5</version>
++            <version>${jjwt.version}</version>
+             <scope>runtime</scope>
+         </dependency>
++        <!-- Gson serializer: keeps JWT (de)serialization off Jackson 2, which Spring Boot 4 no longer manages -->
+         <dependency>
+             <groupId>io.jsonwebtoken</groupId>
+-            <artifactId>jjwt-jackson</artifactId>
+-            <version>0.11.5</version>
++            <artifactId>jjwt-gson</artifactId>
++            <version>${jjwt.version}</version>
+             <scope>runtime</scope>
+         </dependency>
++        <dependency>
++            <groupId>org.springframework.boot</groupId>
++            <artifactId>spring-boot-starter-test</artifactId>
++            <scope>test</scope>
++        </dependency>
+     </dependencies>
+ 
+     <build>
+diff --git a/services/auth-svc/src/main/java/com/contoso/auth/JwtIssuer.java b/services/auth-svc/src/main/java/com/contoso/auth/JwtIssuer.java
+index 66b1296..096fce7 100644
+--- a/services/auth-svc/src/main/java/com/contoso/auth/JwtIssuer.java
++++ b/services/auth-svc/src/main/java/com/contoso/auth/JwtIssuer.java
+@@ -1,14 +1,12 @@
+ package com.contoso.auth;
+ 
+ import io.jsonwebtoken.Jwts;
+-import io.jsonwebtoken.SignatureAlgorithm;
+ import org.springframework.beans.factory.annotation.Value;
+ import org.springframework.stereotype.Component;
+ 
+ import jakarta.annotation.PostConstruct;
+ import java.security.KeyPair;
+ import java.security.KeyPairGenerator;
+-import java.security.interfaces.RSAPrivateKey;
+ import java.security.interfaces.RSAPublicKey;
+ import java.util.Base64;
+ import java.util.Date;
+@@ -38,12 +36,12 @@ public class JwtIssuer {
+     public String issue(String username, String role) {
+         Date now = new Date();
+         return Jwts.builder()
+-                .setIssuer(issuer)
+-                .setSubject(username)
++                .issuer(issuer)
++                .subject(username)
+                 .claim("role", role)
+-                .setIssuedAt(now)
+-                .setExpiration(new Date(now.getTime() + ttlSeconds * 1000L))
+-                .signWith((RSAPrivateKey) keyPair.getPrivate(), SignatureAlgorithm.RS256)
++                .issuedAt(now)
++                .expiration(new Date(now.getTime() + ttlSeconds * 1000L))
++                .signWith(keyPair.getPrivate(), Jwts.SIG.RS256)
+                 .compact();
+     }
+ 
+diff --git a/services/auth-svc/src/test/java/com/contoso/auth/AuthApplicationTests.java b/services/auth-svc/src/test/java/com/contoso/auth/AuthApplicationTests.java
+new file mode 100644
+index 0000000..eccbc0a
+--- /dev/null
++++ b/services/auth-svc/src/test/java/com/contoso/auth/AuthApplicationTests.java
+@@ -0,0 +1,12 @@
++package com.contoso.auth;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.SpringBootTest;
++
++/** Verifies the context loads (including @PostConstruct RSA key init). */
++@SpringBootTest
++class AuthApplicationTests extends AuthTestSupport {
++    @Test
++    void contextLoads() {
++    }
++}
+diff --git a/services/auth-svc/src/test/java/com/contoso/auth/AuthTestSupport.java b/services/auth-svc/src/test/java/com/contoso/auth/AuthTestSupport.java
+new file mode 100644
+index 0000000..de4ec90
+--- /dev/null
++++ b/services/auth-svc/src/test/java/com/contoso/auth/AuthTestSupport.java
+@@ -0,0 +1,25 @@
++package com.contoso.auth;
++
++import org.springframework.test.context.DynamicPropertyRegistry;
++import org.springframework.test.context.DynamicPropertySource;
++
++import java.nio.file.Path;
++
++/** Points the service at an isolated temp SQLite DB so tests never touch /data/auth.db. */
++abstract class AuthTestSupport {
++    static final Path DB = tempDb();
++
++    private static Path tempDb() {
++        try {
++            Path dir = java.nio.file.Files.createTempDirectory("auth-test");
++            return dir.resolve("auth.db");
++        } catch (Exception e) {
++            throw new RuntimeException(e);
++        }
++    }
++
++    @DynamicPropertySource
++    static void props(DynamicPropertyRegistry registry) {
++        registry.add("AUTH_DB_PATH", DB::toString);
++    }
++}
+diff --git a/services/auth-svc/src/test/java/com/contoso/auth/TokenControllerTest.java b/services/auth-svc/src/test/java/com/contoso/auth/TokenControllerTest.java
+new file mode 100644
+index 0000000..a2933c1
+--- /dev/null
++++ b/services/auth-svc/src/test/java/com/contoso/auth/TokenControllerTest.java
+@@ -0,0 +1,57 @@
++package com.contoso.auth;
++
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.boot.test.web.server.LocalServerPort;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.HttpStatusCode;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.client.RestClient;
++
++import java.util.Base64;
++import java.util.Map;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
++class TokenControllerTest extends AuthTestSupport {
++
++    @LocalServerPort
++    int port;
++
++    private RestClient rest() {
++        return RestClient.create("http://localhost:" + port);
++    }
++
++    @Test
++    void token_issuesJwt_viaGsonSerializer() {
++        ResponseEntity<Map> res = rest().post().uri("/token")
++                .body(Map.of("username", "admin", "password", "password"))
++                .retrieve().toEntity(Map.class);
++        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
++        String jwt = (String) res.getBody().get("access_token");
++        assertThat(jwt).isNotBlank();
++
++        // A signed JWT is header.payload.signature; decode the payload to prove the
++        // jjwt-gson serializer emitted the claims (the Jackson-2-free path under Boot 4).
++        String[] parts = jwt.split("\\.");
++        assertThat(parts).hasSize(3);
++        String payload = new String(Base64.getUrlDecoder().decode(parts[1]));
++        assertThat(payload).contains("\"sub\":\"admin\"").contains("\"role\":\"admin\"");
++    }
++
++    @Test
++    void badCredentials_returns401() {
++        HttpStatusCode status = rest().post().uri("/token")
++                .body(Map.of("username", "admin", "password", "wrong"))
++                .exchange((req, res) -> res.getStatusCode());
++        assertThat(status).isEqualTo(HttpStatus.UNAUTHORIZED);
++    }
++
++    @Test
++    void jwks_exposesKey() {
++        ResponseEntity<Map> res = rest().get().uri("/.well-known/jwks").retrieve().toEntity(Map.class);
++        assertThat(res.getStatusCode()).isEqualTo(HttpStatus.OK);
++        assertThat(res.getBody()).containsKey("keys");
++    }
++}

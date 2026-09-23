@@ -1,0 +1,90 @@
+services:
+  web:
+    build: ./services/web
+    container_name: assettrack-web
+    ports:
+      - "4321:4321"
+    environment:
+      ASSETS_SVC_URL: http://assets-svc:8080
+      WORKFORCE_SVC_URL: http://workforce-svc:8080
+      REPORTING_SVC_URL: http://reporting-svc:8080
+      NOTIFICATIONS_SVC_URL: http://notifications-svc:8080
+      AUDIT_SVC_URL: http://audit-svc:8080
+      AUTH_SVC_URL: http://auth-svc:8080
+      DEV_TOKEN_MODE: "true"
+    depends_on:
+      - assets-svc
+      - workforce-svc
+      - reporting-svc
+      - auth-svc
+
+  assets-svc:
+    build: ./services/assets-svc
+    container_name: assettrack-assets-svc
+    ports:
+      - "5001:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      AUTH_JWKS_URL: http://auth-svc:8080/.well-known/jwks
+    volumes:
+      - assets_data:/data
+
+  workforce-svc:
+    build: ./services/workforce-svc
+    container_name: assettrack-workforce-svc
+    ports:
+      - "5002:8080"
+    environment:
+      SERVER_PORT: "8080"
+      AUDIT_SVC_URL: http://audit-svc:8080
+      NOTIFICATIONS_SVC_URL: http://notifications-svc:8080
+      AUTH_JWKS_URL: http://auth-svc:8080/.well-known/jwks
+    volumes:
+      - workforce_data:/data
+
+  reporting-svc:
+    build: ./services/reporting-svc
+    container_name: assettrack-reporting-svc
+    ports:
+      - "5003:8080"
+    environment:
+      ASSETS_SVC_URL: http://assets-svc:8080
+      WORKFORCE_SVC_URL: http://workforce-svc:8080
+    volumes:
+      - reporting_data:/data
+
+  notifications-svc:
+    build: ./services/notifications-svc
+    container_name: assettrack-notifications-svc
+    ports:
+      - "5004:8080"
+    volumes:
+      - notifications_data:/data
+
+  audit-svc:
+    build: ./services/audit-svc
+    container_name: assettrack-audit-svc
+    ports:
+      - "5005:8080"
+    environment:
+      SERVER_PORT: "8080"
+    volumes:
+      - audit_data:/data
+
+  auth-svc:
+    build: ./services/auth-svc
+    container_name: assettrack-auth-svc
+    ports:
+      - "5006:8080"
+    environment:
+      SERVER_PORT: "8080"
+    volumes:
+      - auth_data:/data
+
+volumes:
+  assets_data:
+  workforce_data:
+  reporting_data:
+  notifications_data:
+  audit_data:
+  auth_data:

@@ -1,0 +1,90 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { createAsset } from "../../lib/api/assets";
+
+let createdId: number | null = null;
+let errorText: string | null = null;
+
+if (Astro.request.method === "POST") {
+  const form = await Astro.request.formData();
+  // NOTE: deliberately no client- or server-side validation here.
+  // assets-svc accepts whatever we send. Fixing this is course exercise #7.
+  const body = {
+    assetTag: String(form.get("assetTag") ?? ""),
+    assetType: String(form.get("assetType") ?? ""),
+    manufacturer: String(form.get("manufacturer") ?? ""),
+    model: String(form.get("model") ?? ""),
+    serialNumber: (form.get("serialNumber") as string) || null,
+    purchaseDate: (form.get("purchaseDate") as string) || null,
+    warrantyExpiry: (form.get("warrantyExpiry") as string) || null,
+    status: String(form.get("status") ?? "available"),
+    notes: (form.get("notes") as string) || null,
+  };
+  try {
+    const r = await createAsset(body);
+    createdId = r.id;
+  } catch (e: any) {
+    errorText = e.message;
+  }
+}
+
+if (createdId) {
+  return Astro.redirect(`/assets/${createdId}`);
+}
+
+const types = ["Laptop", "Monitor", "Keyboard", "Phone", "Keycard", "Docking Station"];
+const statuses = ["available", "assigned", "retired", "lost"];
+---
+<Layout title="New asset">
+  <h1 class="h3 mb-3">New asset</h1>
+  {errorText && <div class="alert alert-danger">{errorText}</div>}
+  <form method="post" class="card shadow-sm">
+    <div class="card-body row g-3">
+      <div class="col-md-6">
+        <label class="form-label">Asset tag</label>
+        <input class="form-control" name="assetTag" />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Type</label>
+        <select class="form-select" name="assetType">
+          <option value="">(choose)</option>
+          {types.map(t => <option value={t}>{t}</option>)}
+        </select>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Manufacturer</label>
+        <input class="form-control" name="manufacturer" />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Model</label>
+        <input class="form-control" name="model" />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Serial number</label>
+        <input class="form-control" name="serialNumber" />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Status</label>
+        <select class="form-select" name="status">
+          {statuses.map(s => <option value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Purchase date</label>
+        <input class="form-control" name="purchaseDate" type="date" />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Warranty expiry</label>
+        <input class="form-control" name="warrantyExpiry" type="date" />
+      </div>
+      <div class="col-12">
+        <label class="form-label">Notes</label>
+        <textarea class="form-control" name="notes" rows="3"></textarea>
+      </div>
+      <div class="col-12 d-flex align-items-center gap-3">
+        <button class="btn btn-dark">Create</button>
+        <a href="/assets" class="link-secondary">Cancel</a>
+      </div>
+    </div>
+  </form>
+</Layout>

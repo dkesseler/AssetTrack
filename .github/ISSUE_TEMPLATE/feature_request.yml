@@ -1,0 +1,50 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for the AssetTrack sample
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe what you'd like to see.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: Is your feature request related to a problem? Describe the problem you're trying to solve.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the solution or feature you'd like.
+    validations:
+      required: true
+  - type: dropdown
+    id: service
+    attributes:
+      label: Affected service or area
+      description: Which service or area of the polyglot stack would this affect?
+      options:
+        - web (Astro SSR + React)
+        - assets-svc (.NET 10)
+        - workforce-svc (Java 21 / Spring Boot 3)
+        - reporting-svc (Python FastAPI)
+        - notifications-svc (Python FastAPI)
+        - audit-svc (legacy Java 11 / Spring Boot 2.7)
+        - auth-svc (legacy Java 11 / Spring Boot 2.7)
+        - devcontainer / tooling
+        - docs / course exercises
+        - cross-cutting / multiple services
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any alternative solutions or features you've considered.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any other context or screenshots about the feature request.

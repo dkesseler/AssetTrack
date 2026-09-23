@@ -1,0 +1,71 @@
+---
+import Layout from "../layouts/Layout.astro";
+import StatusBadge from "../components/StatusBadge.astro";
+import { warrantyExpiring, utilization } from "../lib/api/reporting";
+
+let warranty: Awaited<ReturnType<typeof warrantyExpiring>> | null = null;
+let util: Awaited<ReturnType<typeof utilization>> | null = null;
+let errors: string[] = [];
+
+try { warranty = await warrantyExpiring(365); } catch (e: any) { errors.push(`warranty: ${e.message}`); }
+try { util = await utilization(); }            catch (e: any) { errors.push(`utilization: ${e.message}`); }
+---
+<Layout title="Reports">
+  <h1 class="h3 mb-3">Reports</h1>
+  {errors.length > 0 && (
+    <div class="alert alert-warning">
+      <ul class="mb-0">{errors.map(e => <li>{e}</li>)}</ul>
+    </div>
+  )}
+
+  {util && (
+    <section class="mb-4">
+      <h2 class="h5 mb-2">Utilization</h2>
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <p class="mb-2">Total assets: <strong>{util.total}</strong> — In use: <strong>{util.in_use}</strong> ({util.utilization_pct}%)</p>
+          <ul class="list-inline mb-0">
+            {Object.entries(util.by_status).map(([s, n]) => (
+              <li class="list-inline-item me-3">
+                <StatusBadge status={s} />
+                <span class="font-monospace ms-2">{n}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </section>
+  )}
+
+  {warranty && (
+    <section>
+      <h2 class="h5 mb-2">Warranty expiring (next 365 days or already expired) — {warranty.count}</h2>
+      <div class="card shadow-sm">
+        <div class="table-responsive">
+          <table class="table align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Asset</th>
+                <th>Model</th>
+                <th>Warranty expiry</th>
+                <th>Label</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {warranty.items.map(w => (
+                <tr>
+                  <td class="font-monospace">{w.assetTag}</td>
+                  <td>{w.model}</td>
+                  <td>{w.warrantyExpiry}</td>
+                  <td class="text-secondary">{w.label}</td>
+                  <td><StatusBadge status={w.status} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  )}
+</Layout>

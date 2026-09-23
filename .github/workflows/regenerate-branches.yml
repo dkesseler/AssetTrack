@@ -1,0 +1,424 @@
+name: Regenerate learner branches (pull model)
+
+# Self-contained regeneration of the ACC start-of-module-N delta store, driven by
+# a PULL from the public ACC course repo — no inbound repository_dispatch, no
+# cross-repo tokens. Runs entirely on the built-in GITHUB_TOKEN with NO secrets.
+#
+# Trigger model:
+#   - workflow_dispatch: manual button (optionally pin acc_sha / force a module).
+#   - schedule: daily off-peak backstop at 07:17 UTC.
+#
+# On each run it clones public ACC anonymously (github.token), pins to a target
+# SHA, diffs against the last-processed SHA (course-build/.last-acc-sha) to find
+# changed modules, regenerates the downstream chain into staging, validates
+# IN-RUN via validate-branches.yml (workflow_call — because GITHUB_TOKEN PRs do
+# NOT cascade-trigger the pull_request event), and opens a regen PR. The human
+# approval gate (PR review → production-branches environment → promotion) is
+# unchanged. Nothing here moves start-of-module-* aliases or cuts tags.
+
+on:
+  workflow_dispatch:
+    inputs:
+      acc_sha:
+        description: 'ACC commit SHA to target (blank = resolve ACC main HEAD at run time).'
+        required: false
+        default: ''
+      affected_module:
+        description: 'Force a specific module 1..7 (blank = auto-detect from ACC diff).'
+        required: false
+        default: ''
+      acc_version:
+        description: 'Immutable tag version YYYY-MM (blank = current month).'
+        required: false
+        default: ''
+  schedule:
+    # Daily backstop at 07:17 UTC (off-peak). Catches ACC changes without a manual run.
+    - cron: '17 7 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: regenerate-branches
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+      branch: ${{ steps.detect.outputs.branch }}
+      dispatch_id: ${{ steps.detect.outputs.dispatch_id }}
+      from_module: ${{ steps.detect.outputs.min }}
+      target_sha: ${{ steps.detect.outputs.target_sha }}
+      acc_version: ${{ steps.detect.outputs.version }}
+      conflict: ${{ steps.conflicts.outputs.conflict }}
+      reason: ${{ steps.conflicts.outputs.reason }}
+      runner_status: ${{ steps.process.outputs.status }}
+      stale: ${{ steps.process.outputs.stale }}
+    env:
+      ACC_REPO: ${{ vars.ACC_REPO || 'github-samples/advanced-copilot-cli' }}
+      # Optional override of the module-runner (Copilot skill) invocation; the
+      # runner step falls back to a pinned default seed invocation when unset.
+      ACC_MODULE_RUNNER_CMD: ${{ vars.ACC_MODULE_RUNNER_CMD }}
+    steps:
+      - name: Checkout contoso-inventory
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: contoso-inventory
+
+      - name: Checkout ACC (public, anonymous via github.token)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ACC_REPO }}
+          ref: ${{ github.event.inputs.acc_sha }}   # blank -> default branch (main)
+          path: acc
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Ensure base commit present (contoso-inventory)
+        working-directory: contoso-inventory
+        run: git fetch --no-tags origin "$(node -e "console.log(require('./course-build/manifest.json').base.sha)")" || true
+
+      - name: Resolve target SHA + detect affected modules
+        id: detect
+        run: |
+          set -euo pipefail
+          TARGET_SHA="$(git -C acc rev-parse HEAD)"
+          LAST_SHA=""
+          if [ -f contoso-inventory/course-build/.last-acc-sha ]; then
+            LAST_SHA="$(tr -d '[:space:]' < contoso-inventory/course-build/.last-acc-sha)"
+          fi
+          VERSION="${{ github.event.inputs.acc_version }}"
+          if [ -z "$VERSION" ]; then VERSION="$(date -u +%Y-%m)"; fi
+          DID="regen-${{ github.run_id }}"
+          FORCED="${{ github.event.inputs.affected_module }}"
+
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "last_sha=$LAST_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dispatch_id=$DID" >> "$GITHUB_OUTPUT"
+          echo "branch=regen/${DID}/proposal" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$FORCED" ]; then
+            if ! [ "$FORCED" -ge 1 ] 2>/dev/null || [ "$FORCED" -gt 7 ]; then
+              echo "::error::affected_module must be an integer 1..7"; exit 1
+            fi
+            echo "Forced module: $FORCED"
+            echo "modules=$FORCED" >> "$GITHUB_OUTPUT"
+            echo "min=$FORCED" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$LAST_SHA" = "$TARGET_SHA" ]; then
+            echo "ACC unchanged since last processed SHA ($TARGET_SHA). Nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          JSON="$(node contoso-inventory/course-build/scripts/detect-affected-modules.mjs --acc acc --from "$LAST_SHA" --to "$TARGET_SHA")"
+          echo "detect: $JSON"
+          FIRST="$(printf '%s' "$JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(String(JSON.parse(s).firstRun)))")"
+          MIN="$(printf '%s' "$JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);process.stdout.write(String(j.min===null?'':j.min))})")"
+          MODS="$(printf '%s' "$JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);process.stdout.write(j.modules.join(' '))})")"
+
+          if [ "$FIRST" = "true" ]; then
+            echo "No last-acc-sha baseline -> full regen from module 1."
+            echo "modules=" >> "$GITHUB_OUTPUT"     # empty: rebuild from stored deltas, no re-seed
+            echo "min=1" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$MIN" ]; then
+            echo "No module-affecting ACC changes between $LAST_SHA..$TARGET_SHA. Nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Affected modules: $MODS (cascade root $MIN)"
+            echo "modules=$MODS" >> "$GITHUB_OUTPUT"
+            echo "min=$MIN" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure git + create regen branch
+        if: steps.detect.outputs.proceed == 'true'
+        working-directory: contoso-inventory
+        run: |
+          git config user.name "acc-course-bot"
+          git config user.email "acc-course-bot@users.noreply.github.com"
+          git checkout -b "${{ steps.detect.outputs.branch }}"
+
+      - name: Process affected modules by source (asset / seed / stored)
+        id: process
+        if: steps.detect.outputs.proceed == 'true'
+        working-directory: contoso-inventory
+        env:
+          TARGET_SHA: ${{ steps.detect.outputs.target_sha }}
+          MODULES: ${{ steps.detect.outputs.modules }}
+        run: |
+          set -uo pipefail
+          echo "status=NONE" >> "$GITHUB_OUTPUT"
+          if [ -z "${MODULES// }" ]; then
+            echo "No specific modules to process (full rebuild from stored deltas)."
+            echo "stale=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          RUNNER_CMD="${ACC_MODULE_RUNNER_CMD:-}"
+          if [ -z "$RUNNER_CMD" ]; then
+            RUNNER_CMD='copilot -p "Run module-runner in validator/seed mode with: mode=seed module={module} base-ref={base-ref} acc-ref={acc_ref} repo={target} out={out}" --allow-all --log-level error'
+          fi
+          AGG="NONE"; ANY_BLOCKED=false; STALE=""
+          for M in $MODULES; do
+            SRC="$(node -e "const m=require('./course-build/manifest.json').modules.find(x=>x.module==$M);process.stdout.write(m?String(m.source||''):'')")"
+            echo "== module $M (source=$SRC) =="
+            case "$SRC" in
+              asset)
+                # Deterministic re-derive from checked-in ACC assets — NO AI.
+                RES="$(node course-build/scripts/rederive-asset-module.mjs --acc "$GITHUB_WORKSPACE/acc" --module "$M" --apply)"
+                echo "rederive: $RES"
+                CH="$(printf '%s' "$RES" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(String(JSON.parse(s).changed)))")"
+                [ "$CH" = "true" ] && AGG="PASS" && echo "module $M: asset delta re-derived (changed)"
+                ;;
+              seed)
+                OUT="$(mktemp -d)"; TARGET="$PWD"
+                BASE_REF="$(printf 'start-of-module-%02d' "$M")"
+                CMD="$RUNNER_CMD"
+                CMD="${CMD//\{module\}/$M}"; CMD="${CMD//\{base-ref\}/$BASE_REF}"; CMD="${CMD//\{base_ref\}/$BASE_REF}"
+                CMD="${CMD//\{acc-ref\}/$TARGET_SHA}"; CMD="${CMD//\{acc_ref\}/$TARGET_SHA}"
+                CMD="${CMD//\{repo\}/$TARGET}"; CMD="${CMD//\{target\}/$TARGET}"; CMD="${CMD//\{out\}/$OUT}"
+                echo "$CMD"
+                ( cd "$GITHUB_WORKSPACE/acc" && bash -c "$CMD" ) || echo "copilot exit: $?"
+                if [ ! -f "$OUT/result.json" ]; then
+                  echo "::warning::module $M (seed): no result.json — stale"; STALE="$STALE $M:runner-blocked"; continue
+                fi
+                cat "$OUT/result.json"; echo
+                R="$(node -e "try{process.stdout.write(String(require('$OUT/result.json').result||''))}catch(e){process.stdout.write('__ERR__')}")"
+                case "$R" in
+                  PASS)
+                    if compgen -G "$OUT/patches/*.patch" > /dev/null; then
+                      MOD=$(printf 'module-%02d' "$M")
+                      rm -f "course-build/deltas/$MOD/"*.patch || true
+                      cp "$OUT"/patches/*.patch "course-build/deltas/$MOD/"
+                      echo "module $M: staged seed patches"; AGG="PASS"
+                    else
+                      echo "::warning::module $M (seed): PASS but no patches — stale"; STALE="$STALE $M:runner-blocked"
+                    fi ;;
+                  FAIL) echo "::warning::module $M (seed): FAIL — stale"; STALE="$STALE $M:runner-blocked"; [ "$AGG" = "NONE" ] && AGG="FAIL" ;;
+                  BLOCKED) echo "::warning::module $M (seed): BLOCKED — stale"; STALE="$STALE $M:runner-blocked"; ANY_BLOCKED=true; AGG="BLOCKED" ;;
+                  *) echo "::warning::module $M (seed): unparseable result — stale"; STALE="$STALE $M:runner-blocked"; [ "$AGG" = "NONE" ] && AGG="FAIL" ;;
+                esac
+                ;;
+              stored|*)
+                # No deterministic ACC asset and not agent-seeded: surface for a human.
+                echo "::warning::module $M (stored): no auto-derive — stale (needs human authoring)"
+                STALE="$STALE $M:needs-human-authoring"
+                ;;
+            esac
+          done
+          $ANY_BLOCKED && AGG="BLOCKED"
+          echo "status=$AGG" >> "$GITHUB_OUTPUT"
+          echo "stale=$(echo $STALE | xargs)" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate downstream chain into staging
+        id: regen
+        if: steps.detect.outputs.proceed == 'true'
+        continue-on-error: true
+        working-directory: contoso-inventory
+        run: |
+          set -euo pipefail
+          node course-build/scripts/build-branches.mjs \
+            --dispatch-id "${{ steps.detect.outputs.dispatch_id }}" \
+            --from "${{ steps.detect.outputs.min }}"
+
+      - name: Detect conflicts (cascade or runner BLOCKED)
+        id: conflicts
+        if: steps.detect.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.regen.outcome }}" != "success" ]; then
+            echo "conflict=true" >> "$GITHUB_OUTPUT"; echo "reason=cascade" >> "$GITHUB_OUTPUT"
+            echo "::warning::Regeneration failed to apply cleanly — likely an app-code cascade conflict. Flagging for human resolution."
+          elif [ "${{ steps.process.outputs.status }}" = "BLOCKED" ]; then
+            echo "conflict=true" >> "$GITHUB_OUTPUT"; echo "reason=blocked" >> "$GITHUB_OUTPUT"
+            echo "::warning::module-runner reported BLOCKED — flagging for human input."
+          else
+            echo "conflict=false" >> "$GITHUB_OUTPUT"; echo "reason=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit proposal (delta store + last-acc-sha)
+        id: commit
+        if: steps.detect.outputs.proceed == 'true'
+        working-directory: contoso-inventory
+        env:
+          TARGET_SHA: ${{ steps.detect.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          # Asset re-derive may also update manifest.json (expectedTreeSha/patches).
+          git add course-build/deltas course-build/manifest.json
+          if git diff --cached --quiet; then
+            echo "No delta changes produced — no proposal to open (last-acc-sha NOT advanced)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Advance the stored SHA IN THE SAME COMMIT so it only lands when the PR
+          # is merged (human-approved). No-op / unmerged runs never advance it.
+          printf '%s\n' "$TARGET_SHA" > course-build/.last-acc-sha
+          git add course-build/.last-acc-sha
+          git commit -m "regen: update delta store from ACC @ ${TARGET_SHA:0:12}" \
+            -m "affected from module: ${{ steps.detect.outputs.min }}" \
+            -m "dispatch_id: ${{ steps.detect.outputs.dispatch_id }}"
+          git push origin "HEAD:${{ steps.detect.outputs.branch }}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile stale tracking issues (stored / seed with no auto-delta)
+        if: steps.detect.outputs.proceed == 'true'
+        working-directory: contoso-inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE: ${{ steps.process.outputs.stale }}
+          TARGET_SHA: ${{ steps.detect.outputs.target_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Ensure labels exist.
+          for l in acc-stale needs-human-authoring runner-blocked; do
+            gh label create "$l" -c "#FBCA04" -f >/dev/null 2>&1 || true
+          done
+
+          # Build the set of currently-stale module numbers + their reason label.
+          declare -A WANT
+          for pair in $STALE; do
+            M="${pair%%:*}"; L="${pair##*:}"; WANT[$M]="$L"
+          done
+
+          marker() { echo "<!-- acc-stale-module:$1 -->"; }
+
+          # Find the single open tracking issue for a module (by hidden marker).
+          find_issue() {
+            gh issue list --state open --label acc-stale --limit 100 \
+              --json number,body --jq \
+              "map(select(.body | contains(\"$(marker "$1")\"))) | .[0].number // empty"
+          }
+
+          # Open/update one issue per currently-stale module (no duplicates).
+          for M in "${!WANT[@]}"; do
+            L="${WANT[$M]}"
+            TITLE="ACC content changed for module $(printf '%02d' "$M") — delta review needed"
+            BODY="$(printf '%s\n\n%s\n\n- module: %s\n- classification: %s\n- ACC SHA: `%s`\n- run: %s\n\nThis change could not be auto-applied to the delta store. Author/update the module delta, then merge a regen PR to advance `course-build/.last-acc-sha`; this issue auto-closes once the change is no longer detected.' \
+              "$(marker "$M")" "The regenerate workflow detected an ACC change affecting module $M but produced no automatic delta update." "$M" "$L" "$TARGET_SHA" "$RUN_URL")"
+            NUM="$(find_issue "$M" || true)"
+            if [ -n "$NUM" ]; then
+              gh issue edit "$NUM" --body "$BODY" --add-label "acc-stale,$L" >/dev/null
+              echo "updated stale issue #$NUM (module $M)"
+            else
+              gh issue create --title "$TITLE" --body "$BODY" --label "acc-stale,$L" >/dev/null
+              echo "opened stale issue for module $M"
+            fi
+          done
+
+          # Reconcile-close: any open acc-stale issue whose module is NOT stale now
+          # (the change was handled and the SHA advanced past it) is superseded.
+          gh issue list --state open --label acc-stale --limit 100 --json number,body \
+            --jq '.[] | [.number, (.body | capture("acc-stale-module:(?<m>[0-9]+)").m)] | @tsv' \
+          | while IFS=$'\t' read -r NUM MOD; do
+              if [ -z "${MOD:-}" ]; then continue; fi
+              if [ -z "${WANT[$((10#$MOD))]:-}" ]; then
+                gh issue close "$NUM" --comment "Superseded: module $MOD is no longer detected as a stale ACC change (delta updated / SHA advanced). Closed by ${RUN_URL}." >/dev/null || true
+                echo "closed superseded stale issue #$NUM (module $MOD)"
+              fi
+            done
+
+  # In-run validation: GITHUB_TOKEN-authored PRs do NOT cascade-trigger the
+  # pull_request event, so we validate the pushed regen branch here via
+  # workflow_call rather than relying on validate-branches' PR trigger.
+  validate:
+    needs: regenerate
+    if: needs.regenerate.outputs.changed == 'true'
+    uses: ./.github/workflows/validate-branches.yml
+    with:
+      ref: ${{ needs.regenerate.outputs.branch }}
+      dispatch_id: ${{ needs.regenerate.outputs.dispatch_id }}
+
+  open-pr:
+    needs: [regenerate, validate]
+    if: always() && needs.regenerate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Open regen PR (fallback to compare URL)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.regenerate.outputs.branch }}
+          FROM_MODULE: ${{ needs.regenerate.outputs.from_module }}
+          ACC_SHA: ${{ needs.regenerate.outputs.target_sha }}
+          ACC_VERSION: ${{ needs.regenerate.outputs.acc_version }}
+          CONFLICT: ${{ needs.regenerate.outputs.conflict }}
+          CREASON: ${{ needs.regenerate.outputs.reason }}
+          RSTATUS: ${{ needs.regenerate.outputs.runner_status }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+        run: |
+          set -euo pipefail
+          TITLE="regen: ACC delta update from module ${FROM_MODULE} (${ACC_VERSION})"
+          LABELS="acc-regen"
+          BODY_FILE="$(mktemp)"
+          {
+            echo "Automated delta-store regeneration (pull model)."
+            echo
+            echo "| field | value |"
+            echo "| ----- | ----- |"
+            echo "| cascade root module | ${FROM_MODULE} |"
+            echo "| downstream range | start-of-module-$((FROM_MODULE+1)) .. start-of-module-07 |"
+            echo "| acc_sha | \`${ACC_SHA}\` |"
+            echo "| acc_version | ${ACC_VERSION} |"
+            echo "| module-runner result | ${RSTATUS} |"
+            echo "| in-run validation | ${VALIDATE_RESULT} |"
+            echo
+            if [ "$CONFLICT" = "true" ] && [ "$CREASON" = "blocked" ]; then
+              echo "> [!CAUTION]"
+              echo "> **Manual input required.** module-runner returned \`BLOCKED\`. No delta was auto-proposed for the blocked module; a human must unblock and re-run."
+            elif [ "$CONFLICT" = "true" ]; then
+              echo "> [!CAUTION]"
+              echo "> **Manual resolution required.** Regeneration hit a cascade conflict applying the stored downstream deltas (app-code modules M05/M06). Re-author the affected delta(s); app-code conflicts are never auto-resolved."
+            elif [ "$VALIDATE_RESULT" != "success" ]; then
+              echo "> [!WARNING]"
+              echo "> In-run validation did not pass (\`${VALIDATE_RESULT}\`). Review the failing checks before merging."
+            else
+              echo "> [!NOTE]"
+              echo "> Downstream chain regenerated and validated in-run. Review, then merge to advance last-acc-sha and trigger gated promotion."
+            fi
+            echo
+            echo "On merge, \`course-build/.last-acc-sha\` advances to \`${ACC_SHA}\` and \`promote-branches.yml\` atomically moves the \`start-of-module-N\` aliases and cuts \`acc-${ACC_VERSION}/start-of-module-N\` tags (behind the \`production-branches\` environment gate)."
+          } > "$BODY_FILE"
+
+          if [ "$CONFLICT" = "true" ] && [ "$CREASON" = "blocked" ]; then LABELS="$LABELS,needs-human-resolution,runner-blocked";
+          elif [ "$CONFLICT" = "true" ]; then LABELS="$LABELS,needs-human-resolution,app-code-conflict";
+          elif [ "$VALIDATE_RESULT" != "success" ]; then LABELS="$LABELS,validation-failed"; fi
+
+          for l in $(echo "$LABELS" | tr ',' ' '); do gh label create "$l" -c "#0E8A16" -f >/dev/null 2>&1 || true; done
+
+          # PRs created by GITHUB_TOKEN require the org/repo setting "Allow GitHub
+          # Actions to create and approve pull requests". If that is disabled the
+          # create call fails; fall back to surfacing the compare URL (branch is
+          # already pushed) so a human opens the PR manually.
+          if gh pr create --title "$TITLE" --body-file "$BODY_FILE" --base main --head "$BRANCH" --label "$LABELS" 2>/tmp/prerr; then
+            echo "PR opened for $BRANCH"
+          else
+            echo "::warning::gh pr create failed (see below). Branch is pushed; open the PR manually."
+            cat /tmp/prerr || true
+            REPO="${GITHUB_REPOSITORY:-github-samples/contoso-inventory}"
+            {
+              echo "### Regen branch pushed — open the PR manually"
+              echo
+              echo "Automatic PR creation failed (likely the org setting *Allow GitHub Actions to create and approve pull requests* is disabled)."
+              echo
+              echo "Compare / open PR: https://github.com/${REPO}/compare/main...${BRANCH}?expand=1"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

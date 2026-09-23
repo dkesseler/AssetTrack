@@ -1,0 +1,25 @@
+/* Bootstrap 5 plus a few small overrides. */
+@import "bootstrap/dist/css/bootstrap.min.css";
+
+:root {
+  --bs-body-bg: #f8f9fa;
+}
+
+main {
+  flex: 1 1 auto;
+}
+
+.font-monospace-sm {
+  font-family: var(--bs-font-monospace);
+  font-size: 0.875rem;
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: 10rem 1fr;
+  row-gap: 0.5rem;
+  column-gap: 1rem;
+}
+.kv-grid > .label {
+  color: var(--bs-secondary-color);
+}

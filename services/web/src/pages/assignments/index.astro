@@ -1,0 +1,71 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { listAssignments } from "../../lib/api/workforce";
+
+let assignments: Awaited<ReturnType<typeof listAssignments>> = [];
+let error: string | null = null;
+try { assignments = await listAssignments(); } catch (e: any) { error = e.message; }
+
+const active = assignments.filter(a => a.returnedDate === null);
+const returned = assignments.filter(a => a.returnedDate !== null);
+---
+<Layout title="Assignments">
+  <h1 class="h3 mb-3">Assignments</h1>
+  {error && <div class="alert alert-danger">{error}</div>}
+
+  <h2 class="h5 mb-2">Active ({active.length})</h2>
+  <div class="card shadow-sm mb-4">
+    <div class="table-responsive">
+      <table class="table align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>#</th>
+            <th>Asset</th>
+            <th>Employee</th>
+            <th>Assigned</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {active.map(a => (
+            <tr>
+              <td class="font-monospace">{a.id}</td>
+              <td><a class="link-secondary" href={`/assets/${a.assetId}`}>#{a.assetId}</a></td>
+              <td><a class="link-secondary" href={`/employees/${a.employeeId}`}>#{a.employeeId}</a></td>
+              <td>{a.assignedDate}</td>
+              <td class="text-secondary">{a.notes ?? "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2 class="h5 mb-2">Returned ({returned.length})</h2>
+  <div class="card shadow-sm">
+    <div class="table-responsive">
+      <table class="table align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>#</th>
+            <th>Asset</th>
+            <th>Employee</th>
+            <th>Assigned</th>
+            <th>Returned</th>
+          </tr>
+        </thead>
+        <tbody>
+          {returned.map(a => (
+            <tr>
+              <td class="font-monospace">{a.id}</td>
+              <td><a class="link-secondary" href={`/assets/${a.assetId}`}>#{a.assetId}</a></td>
+              <td><a class="link-secondary" href={`/employees/${a.employeeId}`}>#{a.employeeId}</a></td>
+              <td>{a.assignedDate}</td>
+              <td>{a.returnedDate}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</Layout>

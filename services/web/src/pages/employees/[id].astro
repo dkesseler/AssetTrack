@@ -1,0 +1,63 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { getEmployee, listAssignments } from "../../lib/api/workforce";
+
+const id = Number(Astro.params.id);
+let emp: Awaited<ReturnType<typeof getEmployee>> | null = null;
+let assignments: Awaited<ReturnType<typeof listAssignments>> = [];
+let error: string | null = null;
+
+try {
+  emp = await getEmployee(id);
+  assignments = await listAssignments({ employeeId: id });
+} catch (e: any) {
+  error = e.message;
+}
+---
+<Layout title={emp ? `${emp.firstName} ${emp.lastName}` : "Employee"}>
+  {error && <div class="alert alert-danger">{error}</div>}
+  {emp && (
+    <>
+      <div class="d-flex align-items-baseline gap-3 mb-2">
+        <h1 class="h3 mb-0">{emp.firstName} {emp.lastName}</h1>
+        {!emp.active && <span class="badge rounded-pill bg-secondary">Inactive</span>}
+      </div>
+      <p class="text-secondary mb-3">{emp.title} — {emp.department}</p>
+      <div class="card shadow-sm mb-4">
+        <div class="card-body kv-grid">
+          <div class="label">Email</div><div>{emp.email}</div>
+          <div class="label">Hire date</div><div>{emp.hireDate ?? "—"}</div>
+        </div>
+      </div>
+
+      <h2 class="h5 mb-2">Assignments</h2>
+      <div class="card shadow-sm">
+        <div class="table-responsive">
+          <table class="table align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Assigned</th>
+                <th>Returned</th>
+                <th>Asset</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assignments.map(a => (
+                <tr>
+                  <td>{a.assignedDate}</td>
+                  <td>{a.returnedDate ?? <em class="text-secondary">active</em>}</td>
+                  <td><a class="link-secondary" href={`/assets/${a.assetId}`}>#{a.assetId}</a></td>
+                  <td class="text-secondary">{a.notes ?? "—"}</td>
+                </tr>
+              ))}
+              {assignments.length === 0 && (
+                <tr><td colspan="4" class="text-center text-secondary py-4">No assignments yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  )}
+</Layout>

@@ -1,0 +1,11 @@
+asset_tag,asset_type,manufacturer,model,serial_number,purchase_date,warranty_expiry,status,notes
+CON-CSV-001,Laptop,Fabrikam,Vector V14,FB-CSV-001,2023-04-10,2026-04-10,available,
+CON-CSV-002,Monitor,Adatum,PanoView 27,AT-CSV-002,2022-08-22,2025-08-22,available,
+CON-CSV-003,Keyboard,Tailspin,WaveBoard Pro,TS-CSV-003,2023-01-15,2025-01-15,available,
+CON-CSV-004,Phone,Relecloud,VoxPhone 7841,,2021-11-04,2024-11-04,retired,End of life
+CON-CSV-005,Docking Station,Proseware,DockStation P3,PW-CSV-005,2023-06-01,2026-06-01,available,
+CON-CSV-006,Monitor,Trey,ViewLite 27,TR-CSV-006,2022-03-14,2025-03-14,assigned,
+CON-CSV-007,Keycard,Lucerne,AccessCard Pro,,2023-09-01,,available,
+CON-CSV-008,Laptop,Wingtip,WingBook 14 Pro,WT-CSV-008,2024-02-20,2027-02-20,available,
+CON-CSV-009,Laptop,Litware,StudioBook Pro 14,LW-CSV-009,2023-10-11,2026-10-11,assigned,
+CON-CSV-010,Keyboard,Northwind,QuietBoard,,2022-12-05,2024-12-05,available,Missing serial

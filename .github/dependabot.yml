@@ -1,0 +1,117 @@
+version: 2
+updates:
+  # ----- JavaScript / npm -----
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      npm-root:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/services/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      web-dependencies:
+        patterns:
+          - "*"
+
+  # ----- .NET / NuGet -----
+  - package-ecosystem: "nuget"
+    directory: "/services/assets-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      assets-svc-dependencies:
+        patterns:
+          - "*"
+
+  # ----- Java / Maven -----
+  - package-ecosystem: "maven"
+    directory: "/services/audit-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      audit-svc-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "maven"
+    directory: "/services/auth-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      auth-svc-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "maven"
+    directory: "/services/workforce-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      workforce-svc-dependencies:
+        patterns:
+          - "*"
+
+  # ----- Python / pip -----
+  - package-ecosystem: "pip"
+    directory: "/services/notifications-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      notifications-svc-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/services/reporting-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      reporting-svc-dependencies:
+        patterns:
+          - "*"
+
+  # ----- Docker -----
+  - package-ecosystem: "docker"
+    directories:
+      - "/services/assets-svc"
+      - "/services/audit-svc"
+      - "/services/auth-svc"
+      - "/services/notifications-svc"
+      - "/services/reporting-svc"
+      - "/services/web"
+      - "/services/workforce-svc"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"
+
+  # ----- Dev Containers -----
+  - package-ecosystem: "devcontainers"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+
+  # ----- GitHub Actions (activates once workflows are added) -----
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0

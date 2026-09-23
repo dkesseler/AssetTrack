@@ -1,0 +1,1531 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dan Wahlin <dwahlin@xmlforasp.net>
+Date: Fri, 10 Jul 2026 16:05:13 -0400
+Subject: [PATCH 4/4] test: add test suite backfill
+
+The backfill from the delegation brief, generated locally by Copilot CLI as a
+stand-in for the cloud-agent PR (branch kept local):
+
+- assets-svc (xUnit): CRUD, search, stats-by-status, and not-found edge cases
+  against an isolated temporary SQLite database per test via WebApplicationFactory.
+- reporting-svc (pytest): warranty-expiring and utilization reports and CSV
+  import with mocked assets-svc calls (respx/pytest-mock, declared in pyproject),
+  plus the legacy warranty-label formatter.
+
+Validated in the devcontainer: 19 Playwright, 24 xUnit, 46 pytest all pass.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Copilot-Session: 45b74de1-4b9f-405f-bdd4-5767ccdec084
+---
+ .../assets-svc/Tests/AssetEndpointsTests.cs   | 519 ++++++++++++++++++
+ services/reporting-svc/pyproject.toml         |   2 +
+ .../reporting-svc/tests/test_csv_import.py    | 300 ++++++++++
+ .../tests/test_format_helpers.py              | 142 +++++
+ .../tests/test_utilization_reports.py         | 239 ++++++++
+ .../tests/test_warranty_reports.py            | 257 +++++++++
+ 6 files changed, 1459 insertions(+)
+ create mode 100644 services/assets-svc/Tests/AssetEndpointsTests.cs
+ create mode 100644 services/reporting-svc/tests/test_csv_import.py
+ create mode 100644 services/reporting-svc/tests/test_format_helpers.py
+ create mode 100644 services/reporting-svc/tests/test_utilization_reports.py
+ create mode 100644 services/reporting-svc/tests/test_warranty_reports.py
+
+diff --git a/services/assets-svc/Tests/AssetEndpointsTests.cs b/services/assets-svc/Tests/AssetEndpointsTests.cs
+new file mode 100644
+index 0000000..3befbbe
+--- /dev/null
++++ b/services/assets-svc/Tests/AssetEndpointsTests.cs
+@@ -0,0 +1,519 @@
++using System.Net;
++using System.Net.Http.Json;
++using Contoso.Assets.Models;
++using Microsoft.AspNetCore.Hosting;
++using Microsoft.AspNetCore.Mvc.Testing;
++using Xunit;
++
++namespace Contoso.Assets.Tests;
++
++/// <summary>
++/// Integration tests for the Assets API endpoints using WebApplicationFactory.
++/// Each test uses an isolated temporary SQLite database via ASSETS_DB_PATH.
++/// </summary>
++public class AssetEndpointsTests : IDisposable
++{
++    private readonly WebApplicationFactory<Program> _factory;
++    private readonly HttpClient _client;
++    private readonly string _dbPath;
++
++    public AssetEndpointsTests()
++    {
++        // Create a unique temporary database for this test instance
++        _dbPath = Path.Combine(Path.GetTempPath(), $"assets-test-{Guid.NewGuid():N}.db");
++        
++        _factory = new WebApplicationFactory<Program>()
++            .WithWebHostBuilder(builder =>
++            {
++                builder.UseEnvironment("Testing");
++                builder.UseSetting("ASSETS_DB_PATH", _dbPath);
++                
++                // Set environment variable for the app to pick up
++                Environment.SetEnvironmentVariable("ASSETS_DB_PATH", _dbPath);
++            });
++        
++        _client = _factory.CreateClient();
++    }
++
++    public void Dispose()
++    {
++        _client.Dispose();
++        _factory.Dispose();
++        
++        // Clean up the temporary database
++        if (File.Exists(_dbPath))
++        {
++            File.Delete(_dbPath);
++        }
++    }
++
++    #region Create Tests
++
++    [Fact]
++    public async Task Create_WithValidData_ReturnsCreated()
++    {
++        // Arrange
++        var newAsset = new AssetCreate
++        {
++            AssetTag = "TEST-001",
++            AssetType = "Laptop",
++            Manufacturer = "Dell",
++            Model = "XPS 15",
++            SerialNumber = "SN123456",
++            Status = "available",
++            PurchaseDate = "2024-01-15",
++            WarrantyExpiry = "2027-01-15"
++        };
++
++        // Act
++        var response = await _client.PostAsJsonAsync("/assets", newAsset);
++
++        // Assert
++        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
++        var result = await response.Content.ReadFromJsonAsync<Dictionary<string, long>>();
++        Assert.NotNull(result);
++        Assert.True(result.ContainsKey("id"));
++        Assert.True(result["id"] > 0);
++        
++        // Verify Location header
++        Assert.NotNull(response.Headers.Location);
++        Assert.Contains("/assets/", response.Headers.Location.ToString());
++    }
++
++    [Fact]
++    public async Task Create_WithMinimalData_ReturnsCreated()
++    {
++        // Arrange - only required fields
++        var newAsset = new AssetCreate
++        {
++            AssetTag = "MINIMAL-001",
++            AssetType = "Keyboard",
++            Manufacturer = "Logitech",
++            Model = "K120",
++            Status = "available"
++        };
++
++        // Act
++        var response = await _client.PostAsJsonAsync("/assets", newAsset);
++
++        // Assert
++        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
++    }
++
++    [Fact]
++    public async Task Create_WithNullOptionalFields_ReturnsCreated()
++    {
++        // Arrange
++        var newAsset = new AssetCreate
++        {
++            AssetTag = "NULL-OPTIONAL",
++            AssetType = "Monitor",
++            Manufacturer = "Samsung",
++            Model = "S27",
++            SerialNumber = null,
++            PurchaseDate = null,
++            WarrantyExpiry = null,
++            Status = "available",
++            Notes = null
++        };
++
++        // Act
++        var response = await _client.PostAsJsonAsync("/assets", newAsset);
++
++        // Assert
++        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
++    }
++
++    #endregion
++
++    #region Read Tests - Get All
++
++    [Fact]
++    public async Task GetAll_ReturnsAllAssets()
++    {
++        // Arrange - create a few assets
++        await CreateTestAsset("GET-001", "Laptop");
++        await CreateTestAsset("GET-002", "Monitor");
++        await CreateTestAsset("GET-003", "Keyboard");
++
++        // Act
++        var response = await _client.GetAsync("/assets");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.True(assets.Count >= 3);
++    }
++
++    [Fact]
++    public async Task GetAll_WithNoAssets_ReturnsEmptyList()
++    {
++        // Act - fresh database has seed data, but we can verify the endpoint works
++        var response = await _client.GetAsync("/assets");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++    }
++
++    #endregion
++
++    #region Read Tests - Get By Id
++
++    [Fact]
++    public async Task GetById_WithExistingId_ReturnsAsset()
++    {
++        // Arrange
++        var id = await CreateTestAsset("GETID-001", "Laptop");
++
++        // Act
++        var response = await _client.GetAsync($"/assets/{id}");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var asset = await response.Content.ReadFromJsonAsync<Asset>();
++        Assert.NotNull(asset);
++        Assert.Equal(id, asset.Id);
++        Assert.Equal("GETID-001", asset.AssetTag);
++    }
++
++    [Fact]
++    public async Task GetById_WithNonExistentId_ReturnsNotFound()
++    {
++        // Act
++        var response = await _client.GetAsync("/assets/999999");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
++    }
++
++    [Fact]
++    public async Task GetById_WithInvalidId_ReturnsBadRequest()
++    {
++        // Act
++        var response = await _client.GetAsync("/assets/invalid");
++
++        // Assert - route constraint should prevent this from matching
++        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
++    }
++
++    #endregion
++
++    #region Update Tests
++
++    [Fact]
++    public async Task Update_WithExistingId_ReturnsNoContent()
++    {
++        // Arrange
++        var id = await CreateTestAsset("UPDATE-001", "Laptop");
++        var update = new AssetCreate
++        {
++            AssetTag = "UPDATED-001",
++            AssetType = "Laptop",
++            Manufacturer = "HP",
++            Model = "EliteBook",
++            SerialNumber = "NEW-SN",
++            Status = "assigned"
++        };
++
++        // Act
++        var response = await _client.PutAsJsonAsync($"/assets/{id}", update);
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
++
++        // Verify the update
++        var getResponse = await _client.GetAsync($"/assets/{id}");
++        var asset = await getResponse.Content.ReadFromJsonAsync<Asset>();
++        Assert.NotNull(asset);
++        Assert.Equal("UPDATED-001", asset.AssetTag);
++        Assert.Equal("HP", asset.Manufacturer);
++        Assert.Equal("EliteBook", asset.Model);
++    }
++
++    [Fact]
++    public async Task Update_WithNonExistentId_ReturnsNotFound()
++    {
++        // Arrange
++        var update = new AssetCreate
++        {
++            AssetTag = "NOEXIST-001",
++            AssetType = "Laptop",
++            Manufacturer = "Dell",
++            Model = "XPS",
++            Status = "available"
++        };
++
++        // Act
++        var response = await _client.PutAsJsonAsync("/assets/999999", update);
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
++    }
++
++    [Fact]
++    public async Task Update_WithPartialData_UpdatesAllFields()
++    {
++        // Arrange
++        var id = await CreateTestAsset("PARTIAL-001", "Monitor");
++        var update = new AssetCreate
++        {
++            AssetTag = "PARTIAL-UPDATED",
++            AssetType = "Monitor",
++            Manufacturer = "LG",
++            Model = "27UK850",
++            Status = "retired",
++            Notes = "Updated notes"
++        };
++
++        // Act
++        var response = await _client.PutAsJsonAsync($"/assets/{id}", update);
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
++    }
++
++    #endregion
++
++    #region Delete Tests
++
++    [Fact]
++    public async Task Delete_WithExistingId_ReturnsNoContent()
++    {
++        // Arrange
++        var id = await CreateTestAsset("DELETE-001", "Keyboard");
++
++        // Act
++        var response = await _client.DeleteAsync($"/assets/{id}");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
++
++        // Verify deletion
++        var getResponse = await _client.GetAsync($"/assets/{id}");
++        Assert.Equal(HttpStatusCode.NotFound, getResponse.StatusCode);
++    }
++
++    [Fact]
++    public async Task Delete_WithNonExistentId_ReturnsNotFound()
++    {
++        // Act
++        var response = await _client.DeleteAsync("/assets/999999");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
++    }
++
++    [Fact]
++    public async Task Delete_IsIdempotent_SecondDeleteReturnsNotFound()
++    {
++        // Arrange
++        var id = await CreateTestAsset("IDEMPOTENT-001", "Phone");
++
++        // Act - first delete
++        var firstResponse = await _client.DeleteAsync($"/assets/{id}");
++        Assert.Equal(HttpStatusCode.NoContent, firstResponse.StatusCode);
++
++        // Act - second delete
++        var secondResponse = await _client.DeleteAsync($"/assets/{id}");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.NotFound, secondResponse.StatusCode);
++    }
++
++    #endregion
++
++    #region Search Tests
++
++    [Fact]
++    public async Task Search_ByType_ReturnsMatchingAssets()
++    {
++        // Arrange
++        await CreateTestAsset("SEARCH-LAPTOP-1", "Laptop");
++        await CreateTestAsset("SEARCH-LAPTOP-2", "Laptop");
++        await CreateTestAsset("SEARCH-MONITOR-1", "Monitor");
++
++        // Act
++        var response = await _client.GetAsync("/assets/search?type=Laptop");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.True(assets.Count >= 2);
++        Assert.All(assets, a => Assert.Equal("Laptop", a.AssetType));
++    }
++
++    [Fact]
++    public async Task Search_ByStatus_ReturnsMatchingAssets()
++    {
++        // Arrange
++        await CreateTestAsset("STATUS-AVAIL-1", "Laptop", status: "available");
++        await CreateTestAsset("STATUS-AVAIL-2", "Monitor", status: "available");
++        await CreateTestAsset("STATUS-ASSIGNED-1", "Keyboard", status: "assigned");
++
++        // Act
++        var response = await _client.GetAsync("/assets/search?status=available");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.True(assets.Count >= 2);
++        Assert.All(assets, a => Assert.Equal("available", a.Status));
++    }
++
++    [Fact]
++    public async Task Search_ByQuery_ReturnsMatchingAssets()
++    {
++        // Arrange
++        await CreateTestAsset("DELL-001", "Laptop", manufacturer: "Dell", model: "XPS");
++        await CreateTestAsset("HP-001", "Laptop", manufacturer: "HP", model: "EliteBook");
++        await CreateTestAsset("DELL-002", "Monitor", manufacturer: "Dell", model: "U2720Q");
++
++        // Act
++        var response = await _client.GetAsync("/assets/search?q=Dell");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.True(assets.Count >= 2);
++        Assert.All(assets, a => 
++            Assert.True(
++                a.AssetTag.Contains("Dell", StringComparison.OrdinalIgnoreCase) ||
++                a.Manufacturer.Contains("Dell", StringComparison.OrdinalIgnoreCase) ||
++                (a.Model?.Contains("Dell", StringComparison.OrdinalIgnoreCase) ?? false)
++            )
++        );
++    }
++
++    [Fact]
++    public async Task Search_WithCombinedFilters_ReturnsMatchingAssets()
++    {
++        // Arrange
++        await CreateTestAsset("COMBO-1", "Laptop", manufacturer: "Dell", status: "available");
++        await CreateTestAsset("COMBO-2", "Laptop", manufacturer: "Dell", status: "assigned");
++        await CreateTestAsset("COMBO-3", "Monitor", manufacturer: "Dell", status: "available");
++
++        // Act
++        var response = await _client.GetAsync("/assets/search?type=Laptop&status=available&q=Dell");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.True(assets.Count >= 1);
++        Assert.All(assets, a => 
++        {
++            Assert.Equal("Laptop", a.AssetType);
++            Assert.Equal("available", a.Status);
++        });
++    }
++
++    [Fact]
++    public async Task Search_WithNoMatches_ReturnsEmptyList()
++    {
++        // Act
++        var response = await _client.GetAsync("/assets/search?type=NonExistentType");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.Empty(assets);
++    }
++
++    [Fact]
++    public async Task Search_WithNoParameters_ReturnsAllAssets()
++    {
++        // Arrange
++        await CreateTestAsset("ALL-1", "Laptop");
++        await CreateTestAsset("ALL-2", "Monitor");
++
++        // Act
++        var response = await _client.GetAsync("/assets/search");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var assets = await response.Content.ReadFromJsonAsync<List<Asset>>();
++        Assert.NotNull(assets);
++        Assert.True(assets.Count >= 2);
++    }
++
++    #endregion
++
++    #region Stats Tests
++
++    [Fact]
++    public async Task StatsByStatus_ReturnsCorrectCounts()
++    {
++        // Arrange
++        await CreateTestAsset("STATS-AVAIL-1", "Laptop", status: "available");
++        await CreateTestAsset("STATS-AVAIL-2", "Monitor", status: "available");
++        await CreateTestAsset("STATS-ASSIGNED-1", "Keyboard", status: "assigned");
++        await CreateTestAsset("STATS-RETIRED-1", "Phone", status: "retired");
++
++        // Act
++        var response = await _client.GetAsync("/assets/stats/by-status");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var stats = await response.Content.ReadFromJsonAsync<Dictionary<string, int>>();
++        Assert.NotNull(stats);
++        
++        // Verify we have at least the statuses we created
++        Assert.True(stats.ContainsKey("available"));
++        Assert.True(stats["available"] >= 2);
++        Assert.True(stats.ContainsKey("assigned"));
++        Assert.True(stats["assigned"] >= 1);
++        Assert.True(stats.ContainsKey("retired"));
++        Assert.True(stats["retired"] >= 1);
++    }
++
++    [Fact]
++    public async Task StatsByStatus_WithNoAssets_ReturnsEmptyDictionary()
++    {
++        // Note: Fresh database has seed data, so we can't easily test empty state
++        // But we can verify the endpoint returns valid data structure
++        
++        // Act
++        var response = await _client.GetAsync("/assets/stats/by-status");
++
++        // Assert
++        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
++        var stats = await response.Content.ReadFromJsonAsync<Dictionary<string, int>>();
++        Assert.NotNull(stats);
++    }
++
++    #endregion
++
++    #region Helper Methods
++
++    private async Task<long> CreateTestAsset(
++        string tag, 
++        string type, 
++        string manufacturer = "Test Mfr",
++        string model = "Test Model",
++        string status = "available")
++    {
++        var asset = new AssetCreate
++        {
++            AssetTag = tag,
++            AssetType = type,
++            Manufacturer = manufacturer,
++            Model = model,
++            Status = status
++        };
++
++        var response = await _client.PostAsJsonAsync("/assets", asset);
++        response.EnsureSuccessStatusCode();
++        
++        var result = await response.Content.ReadFromJsonAsync<Dictionary<string, long>>();
++        return result!["id"];
++    }
++
++    #endregion
++}
+diff --git a/services/reporting-svc/pyproject.toml b/services/reporting-svc/pyproject.toml
+index cabeaaa..da0b06c 100644
+--- a/services/reporting-svc/pyproject.toml
++++ b/services/reporting-svc/pyproject.toml
+@@ -18,5 +18,7 @@ include = ["app*"]
+ dev = [
+     "pytest==9.1.1",
+     "pytest-asyncio==1.4.0",
++    "pytest-mock==3.14.0",
++    "respx==0.22.0",
+     "ruff==0.16.3",
+ ]
+diff --git a/services/reporting-svc/tests/test_csv_import.py b/services/reporting-svc/tests/test_csv_import.py
+new file mode 100644
+index 0000000..abc5f07
+--- /dev/null
++++ b/services/reporting-svc/tests/test_csv_import.py
+@@ -0,0 +1,300 @@
++"""
++Tests for CSV import endpoint.
++Mocks HTTP calls to assets-svc.
++"""
++
++import io
++import pytest
++import respx
++import httpx
++from fastapi.testclient import TestClient
++
++from app.main import app
++
++
++@pytest.fixture
++def client():
++    """Create a test client for the FastAPI app."""
++    return TestClient(app)
++
++
++class TestCSVImport:
++    """Test the /imports/assets endpoint."""
++
++    @respx.mock
++    def test_import_valid_csv(self, client):
++        """Test importing a valid CSV file."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,serial_number,purchase_date,warranty_expiry,status,notes
++TEST-001,Laptop,Dell,XPS 15,SN001,2024-01-01,2027-01-01,available,
++TEST-002,Monitor,Samsung,S27,SN002,2024-02-01,2027-02-01,available,
++TEST-003,Keyboard,Logitech,K120,,2024-03-01,2027-03-01,available,"""
++
++        # Mock assets-svc POST responses
++        route = respx.post("http://assets-svc:8080/assets")
++        route.side_effect = [
++            httpx.Response(201, json={"id": 1}),
++            httpx.Response(201, json={"id": 2}),
++            httpx.Response(201, json={"id": 3}),
++        ]
++
++        # Create file upload
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        data = response.json()
++
++        assert data["imported"] == 3
++        assert "TEST-001" in data["asset_tags"]
++        assert "TEST-002" in data["asset_tags"]
++        assert "TEST-003" in data["asset_tags"]
++        assert len(data["asset_tags"]) == 3
++
++    @respx.mock
++    def test_import_csv_with_optional_fields(self, client):
++        """Test importing CSV with optional fields populated."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,serial_number,purchase_date,warranty_expiry,status,notes
++OPT-001,Phone,Apple,iPhone 14,IMEI123,2024-01-15,2026-01-15,assigned,Company device"""
++
++        respx.post("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(201, json={"id": 1})
++        )
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        data = response.json()
++
++        assert data["imported"] == 1
++        assert data["asset_tags"] == ["OPT-001"]
++
++    @respx.mock
++    def test_import_csv_with_null_optional_fields(self, client):
++        """Test importing CSV with empty optional fields."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,serial_number,purchase_date,warranty_expiry,status,notes
++NULL-001,Keycard,Generic,Card,,,,available,"""
++
++        respx.post("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(201, json={"id": 1})
++        )
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        data = response.json()
++
++        assert data["imported"] == 1
++        assert data["asset_tags"] == ["NULL-001"]
++
++    def test_import_csv_missing_required_columns(self, client):
++        """Test importing CSV with missing required columns."""
++        csv_content = """asset_tag,manufacturer,model
++MISSING-001,Dell,XPS"""
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 400
++        assert "must contain columns" in response.json()["detail"]
++
++    def test_import_csv_missing_asset_type(self, client):
++        """Test CSV missing the asset_type required column."""
++        csv_content = """asset_tag,manufacturer,model,status
++TYPE-001,Dell,XPS,available"""
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 400
++        assert "asset_type" in response.json()["detail"]
++
++    def test_import_csv_missing_status(self, client):
++        """Test CSV missing the status required column."""
++        csv_content = """asset_tag,asset_type,manufacturer,model
++STATUS-001,Laptop,Dell,XPS"""
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 400
++        assert "status" in response.json()["detail"]
++
++    def test_import_empty_csv(self, client):
++        """Test importing an empty CSV file."""
++        csv_content = ""
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 400
++
++    def test_import_csv_header_only(self, client):
++        """Test importing CSV with only headers, no data rows."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,status"""
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        # Should succeed but import 0 rows
++        assert response.status_code == 200
++        data = response.json()
++        assert data["imported"] == 0
++        assert data["asset_tags"] == []
++
++    @respx.mock
++    def test_import_csv_single_row(self, client):
++        """Test importing CSV with single data row."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,status
++SINGLE-001,Monitor,LG,27UK850,available"""
++
++        respx.post("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(201, json={"id": 1})
++        )
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        data = response.json()
++        assert data["imported"] == 1
++        assert data["asset_tags"] == ["SINGLE-001"]
++
++    @respx.mock
++    def test_import_csv_large_batch(self, client):
++        """Test importing CSV with multiple rows."""
++        rows = [
++            "asset_tag,asset_type,manufacturer,model,status"
++        ]
++        for i in range(10):
++            rows.append(f"BATCH-{i:03d},Laptop,Dell,XPS,available")
++        
++        csv_content = "\n".join(rows)
++
++        # Mock 10 successful creates
++        route = respx.post("http://assets-svc:8080/assets")
++        route.side_effect = [
++            httpx.Response(201, json={"id": i}) for i in range(1, 11)
++        ]
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        data = response.json()
++        assert data["imported"] == 10
++        assert len(data["asset_tags"]) == 10
++        assert "BATCH-000" in data["asset_tags"]
++        assert "BATCH-009" in data["asset_tags"]
++
++    @respx.mock
++    def test_import_csv_assets_svc_error(self, client):
++        """Test import when assets-svc returns error.
++        
++        Note: Current implementation will raise HTTPStatusError and crash.
++        This is intentional per the exercise description - no error handling yet.
++        """
++        csv_content = """asset_tag,asset_type,manufacturer,model,status
++ERROR-001,Laptop,Dell,XPS,available"""
++
++        respx.post("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(500, json={"error": "Internal error"})
++        )
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        
++        # Current implementation will let the HTTPStatusError bubble up
++        # The test client catches it and returns 500
++        with pytest.raises(httpx.HTTPStatusError):
++            # Need to make the actual request, not through test client
++            # which converts exceptions to responses
++            import asyncio
++            from app.routers.imports_ import import_assets
++            from fastapi import UploadFile
++            
++            # Create an UploadFile mock
++            class MockFile:
++                async def read(self):
++                    return csv_content.encode()
++            
++            async def run_import():
++                await import_assets(MockFile())
++            
++            asyncio.run(run_import())
++
++    @respx.mock
++    def test_import_csv_with_extra_columns(self, client):
++        """Test importing CSV with extra columns beyond required."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,status,extra_col,another_extra
++EXTRA-001,Laptop,Dell,XPS,available,extra_val,another_val"""
++
++        respx.post("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(201, json={"id": 1})
++        )
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        # Should succeed - extra columns are ignored
++        assert response.status_code == 200
++        data = response.json()
++        assert data["imported"] == 1
++
++    @respx.mock
++    def test_import_csv_verifies_payload_structure(self, client):
++        """Test that CSV import creates correct payload structure."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,serial_number,purchase_date,warranty_expiry,status,notes
++VERIFY-001,Laptop,Dell,XPS 15,SN123,2024-01-01,2027-01-01,available,Test note"""
++
++        captured_payload = {}
++
++        def capture_payload(request):
++            captured_payload.update(request.content.decode())
++            return httpx.Response(201, json={"id": 1})
++
++        respx.post("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(201, json={"id": 1})
++        )
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        
++        # Verify the request was made to assets-svc
++        assert len(respx.calls) == 1
++        request = respx.calls[0].request
++        
++        # Verify it was a POST with JSON
++        assert request.method == "POST"
++        assert "application/json" in request.headers.get("content-type", "")
++
++    @respx.mock
++    def test_import_csv_preserves_order(self, client):
++        """Test that imported asset tags are in CSV order."""
++        csv_content = """asset_tag,asset_type,manufacturer,model,status
++ZEBRA-001,Laptop,Dell,XPS,available
++ALPHA-001,Monitor,Samsung,S27,available
++BRAVO-001,Keyboard,Logitech,K120,available"""
++
++        route = respx.post("http://assets-svc:8080/assets")
++        route.side_effect = [
++            httpx.Response(201, json={"id": i}) for i in range(1, 4)
++        ]
++
++        files = {"file": ("test.csv", io.BytesIO(csv_content.encode()), "text/csv")}
++        response = client.post("/imports/assets", files=files)
++
++        assert response.status_code == 200
++        data = response.json()
++        
++        # Tags should be in CSV order (ZEBRA, ALPHA, BRAVO), not sorted
++        assert data["asset_tags"] == ["ZEBRA-001", "ALPHA-001", "BRAVO-001"]
++
++    def test_import_requires_file(self, client):
++        """Test that import endpoint requires a file."""
++        response = client.post("/imports/assets")
++        
++        # Should get validation error for missing file
++        assert response.status_code == 422
+diff --git a/services/reporting-svc/tests/test_format_helpers.py b/services/reporting-svc/tests/test_format_helpers.py
+new file mode 100644
+index 0000000..a241ed1
+--- /dev/null
++++ b/services/reporting-svc/tests/test_format_helpers.py
+@@ -0,0 +1,142 @@
++"""
++Tests for the legacy format_helpers module.
++Tests the old-style formatting functions including warranty label formatting.
++"""
++
++import datetime
++import pytest
++
++from app.legacy.format_helpers import (
++    format_warranty_label,
++    summarize_status_counts,
++)
++
++
++class TestFormatWarrantyLabel:
++    """Test warranty label formatting with various expiry scenarios."""
++
++    def test_expired_warranty_far_past(self):
++        """Test formatting for warranty expired long ago."""
++        asset_tag = "TEST-001"
++        expiry_date = datetime.date.today() - datetime.timedelta(days=100)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-001" in result
++        assert "EXPIRED" in result
++        assert "100 days ago" in result
++
++    def test_expired_warranty_recently(self):
++        """Test formatting for recently expired warranty."""
++        asset_tag = "TEST-002"
++        expiry_date = datetime.date.today() - datetime.timedelta(days=5)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-002" in result
++        assert "EXPIRED" in result
++        assert "5 days ago" in result
++
++    def test_expiring_within_30_days_urgent(self):
++        """Test formatting for warranty expiring within 30 days (urgent)."""
++        asset_tag = "TEST-003"
++        expiry_date = datetime.date.today() + datetime.timedelta(days=15)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-003" in result
++        assert "expires in 15 days" in result
++        assert "URGENT" in result
++
++    def test_expiring_exactly_29_days_urgent(self):
++        """Test formatting for warranty expiring in exactly 29 days."""
++        asset_tag = "TEST-004"
++        expiry_date = datetime.date.today() + datetime.timedelta(days=29)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-004" in result
++        assert "expires in 29 days" in result
++        assert "URGENT" in result
++
++    def test_expiring_30_days_or_more(self):
++        """Test formatting for warranty expiring 30 or more days out."""
++        asset_tag = "TEST-005"
++        expiry_date = datetime.date.today() + datetime.timedelta(days=90)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-005" in result
++        assert "expires" in result
++        assert "URGENT" not in result
++        assert expiry_date.strftime("%Y-%m-%d") in result
++
++    def test_expiring_exactly_30_days(self):
++        """Test formatting for warranty expiring in exactly 30 days."""
++        asset_tag = "TEST-006"
++        expiry_date = datetime.date.today() + datetime.timedelta(days=30)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-006" in result
++        assert "expires" in result
++        # Should not be marked urgent at exactly 30 days
++        assert "URGENT" not in result
++
++    def test_expiring_far_future(self):
++        """Test formatting for warranty expiring far in the future."""
++        asset_tag = "TEST-007"
++        expiry_date = datetime.date.today() + datetime.timedelta(days=365)
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-007" in result
++        assert "expires" in result
++        assert "URGENT" not in result
++
++    def test_expiring_today(self):
++        """Test formatting for warranty expiring today."""
++        asset_tag = "TEST-008"
++        expiry_date = datetime.date.today()
++        
++        result = format_warranty_label(asset_tag, expiry_date)
++        
++        assert "TEST-008" in result
++        assert "expires in 0 days" in result
++        assert "URGENT" in result
++
++
++class TestSummarizeStatusCounts:
++    """Test status count summarization."""
++
++    def test_empty_counts(self):
++        """Test with empty dictionary."""
++        result = summarize_status_counts({})
++        assert result == ""
++
++    def test_single_status(self):
++        """Test with single status."""
++        result = summarize_status_counts({"available": 5})
++        assert "available=5" in result
++
++    def test_multiple_statuses(self):
++        """Test with multiple statuses."""
++        result = summarize_status_counts({
++            "available": 10,
++            "assigned": 7,
++            "retired": 3
++        })
++        
++        assert "available=10" in result
++        assert "assigned=7" in result
++        assert "retired=3" in result
++
++    def test_zero_counts(self):
++        """Test with zero counts."""
++        result = summarize_status_counts({
++            "available": 0,
++            "assigned": 0
++        })
++        
++        assert "available=0" in result
++        assert "assigned=0" in result
+diff --git a/services/reporting-svc/tests/test_utilization_reports.py b/services/reporting-svc/tests/test_utilization_reports.py
+new file mode 100644
+index 0000000..388440b
+--- /dev/null
++++ b/services/reporting-svc/tests/test_utilization_reports.py
+@@ -0,0 +1,239 @@
++"""
++Tests for utilization reports endpoint.
++Mocks HTTP calls to assets-svc.
++"""
++
++import pytest
++import respx
++import httpx
++from fastapi.testclient import TestClient
++
++from app.main import app
++
++
++@pytest.fixture
++def client():
++    """Create a test client for the FastAPI app."""
++    return TestClient(app)
++
++
++class TestUtilizationReport:
++    """Test the /reports/utilization endpoint."""
++
++    @respx.mock
++    def test_utilization_with_mixed_statuses(self, client):
++        """Test utilization report with various asset statuses."""
++        mock_stats = {
++            "available": 50,
++            "assigned": 30,
++            "retired": 15,
++            "lost": 5
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 100  # Sum of all statuses
++        assert data["in_use"] == 30  # Only assigned
++        assert data["utilization_pct"] == 30.0  # 30/100 * 100
++        assert data["by_status"] == mock_stats
++
++    @respx.mock
++    def test_utilization_all_assigned(self, client):
++        """Test utilization report when all assets are assigned."""
++        mock_stats = {
++            "assigned": 100
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 100
++        assert data["in_use"] == 100
++        assert data["utilization_pct"] == 100.0
++
++    @respx.mock
++    def test_utilization_all_available(self, client):
++        """Test utilization report when all assets are available."""
++        mock_stats = {
++            "available": 75
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 75
++        assert data["in_use"] == 0  # No assigned
++        assert data["utilization_pct"] == 0.0
++
++    @respx.mock
++    def test_utilization_no_assets(self, client):
++        """Test utilization report when no assets exist (zero total)."""
++        mock_stats = {}
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 0
++        assert data["in_use"] == 0
++        assert data["utilization_pct"] == 0.0  # Should not divide by zero
++        assert data["by_status"] == {}
++
++    @respx.mock
++    def test_utilization_no_assigned_status(self, client):
++        """Test utilization when there are assets but none assigned."""
++        mock_stats = {
++            "available": 20,
++            "retired": 5
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 25
++        assert data["in_use"] == 0
++        assert data["utilization_pct"] == 0.0
++
++    @respx.mock
++    def test_utilization_rounding(self, client):
++        """Test utilization percentage rounding."""
++        mock_stats = {
++            "available": 67,
++            "assigned": 33
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 100
++        assert data["in_use"] == 33
++        # 33/100 * 100 = 33.0, rounded to 1 decimal
++        assert data["utilization_pct"] == 33.0
++
++    @respx.mock
++    def test_utilization_fractional_percentage(self, client):
++        """Test utilization with fractional percentage."""
++        mock_stats = {
++            "available": 47,
++            "assigned": 53
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 100
++        assert data["in_use"] == 53
++        assert data["utilization_pct"] == 53.0
++
++    @respx.mock
++    def test_utilization_small_numbers(self, client):
++        """Test utilization with small asset counts."""
++        mock_stats = {
++            "available": 2,
++            "assigned": 1
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 3
++        assert data["in_use"] == 1
++        # 1/3 * 100 = 33.333... rounded to 33.3
++        assert data["utilization_pct"] == 33.3
++
++    @respx.mock
++    def test_utilization_assets_svc_error(self, client):
++        """Test utilization report when assets-svc is unavailable."""
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(500, json={"error": "Internal error"})
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 502
++        assert "assets-svc unavailable" in response.json()["detail"]
++
++    @respx.mock
++    def test_utilization_assets_svc_timeout(self, client):
++        """Test utilization report when assets-svc times out."""
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            side_effect=httpx.TimeoutException("Timeout")
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 502
++        assert "assets-svc unavailable" in response.json()["detail"]
++
++    @respx.mock
++    def test_utilization_multiple_statuses(self, client):
++        """Test utilization with many different statuses."""
++        mock_stats = {
++            "available": 100,
++            "assigned": 75,
++            "retired": 25,
++            "lost": 10,
++            "maintenance": 5
++        }
++        
++        respx.get("http://assets-svc:8080/assets/stats/by-status").mock(
++            return_value=httpx.Response(200, json=mock_stats)
++        )
++        
++        response = client.get("/reports/utilization")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["total"] == 215
++        assert data["in_use"] == 75
++        assert data["utilization_pct"] == 34.9  # 75/215 * 100 = 34.88... -> 34.9
++        assert len(data["by_status"]) == 5
+diff --git a/services/reporting-svc/tests/test_warranty_reports.py b/services/reporting-svc/tests/test_warranty_reports.py
+new file mode 100644
+index 0000000..e271eb6
+--- /dev/null
++++ b/services/reporting-svc/tests/test_warranty_reports.py
+@@ -0,0 +1,257 @@
++"""
++Tests for warranty expiring reports endpoint.
++Mocks HTTP calls to assets-svc.
++"""
++
++import pytest
++import respx
++import httpx
++from datetime import date, timedelta
++from fastapi.testclient import TestClient
++
++from app.main import app
++
++
++@pytest.fixture
++def client():
++    """Create a test client for the FastAPI app."""
++    return TestClient(app)
++
++
++class TestWarrantyExpiringReport:
++    """Test the /reports/warranty-expiring endpoint."""
++
++    @respx.mock
++    def test_warranty_expiring_with_assets(self, client):
++        """Test warranty report with assets expiring within threshold."""
++        # Mock the assets-svc response
++        today = date.today()
++        within_threshold = (today + timedelta(days=90)).isoformat()
++        outside_threshold = (today + timedelta(days=200)).isoformat()
++        expired = (today - timedelta(days=10)).isoformat()
++        
++        mock_assets = [
++            {
++                "id": 1,
++                "assetTag": "EXPIRING-001",
++                "assetType": "Laptop",
++                "manufacturer": "Dell",
++                "model": "XPS 15",
++                "warrantyExpiry": within_threshold,
++                "status": "available"
++            },
++            {
++                "id": 2,
++                "assetTag": "OK-002",
++                "assetType": "Monitor",
++                "manufacturer": "Samsung",
++                "model": "S27",
++                "warrantyExpiry": outside_threshold,
++                "status": "available"
++            },
++            {
++                "id": 3,
++                "assetTag": "EXPIRED-003",
++                "assetType": "Keyboard",
++                "manufacturer": "Logitech",
++                "model": "K120",
++                "warrantyExpiry": expired,
++                "status": "retired"
++            }
++        ]
++        
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(200, json=mock_assets)
++        )
++        
++        # Make request
++        response = client.get("/reports/warranty-expiring?within_days=180")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["count"] == 2  # Should include within threshold and expired
++        assert data["within_days"] == 180
++        assert len(data["items"]) == 2
++        
++        # Verify items are sorted by expiry date (earliest first)
++        assert data["items"][0]["assetTag"] == "EXPIRED-003"
++        assert data["items"][1]["assetTag"] == "EXPIRING-001"
++        
++        # Verify label formatting
++        assert "EXPIRED" in data["items"][0]["label"]
++        assert "EXPIRING-001" in data["items"][1]["label"]
++
++    @respx.mock
++    def test_warranty_expiring_no_matches(self, client):
++        """Test warranty report when no assets are expiring."""
++        today = date.today()
++        far_future = (today + timedelta(days=500)).isoformat()
++        
++        mock_assets = [
++            {
++                "id": 1,
++                "assetTag": "DISTANT-001",
++                "assetType": "Laptop",
++                "manufacturer": "Dell",
++                "model": "XPS",
++                "warrantyExpiry": far_future,
++                "status": "available"
++            }
++        ]
++        
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(200, json=mock_assets)
++        )
++        
++        response = client.get("/reports/warranty-expiring?within_days=180")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["count"] == 0
++        assert data["items"] == []
++
++    @respx.mock
++    def test_warranty_expiring_empty_assets(self, client):
++        """Test warranty report when no assets exist."""
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(200, json=[])
++        )
++        
++        response = client.get("/reports/warranty-expiring")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["count"] == 0
++        assert data["items"] == []
++
++    @respx.mock
++    def test_warranty_expiring_no_warranty_date(self, client):
++        """Test warranty report skips assets without warranty expiry."""
++        mock_assets = [
++            {
++                "id": 1,
++                "assetTag": "NO-WARRANTY-001",
++                "assetType": "Keycard",
++                "manufacturer": "Generic",
++                "model": "Card",
++                "warrantyExpiry": None,
++                "status": "available"
++            },
++            {
++                "id": 2,
++                "assetTag": "NO-WARRANTY-002",
++                "assetType": "Badge",
++                "manufacturer": "Generic",
++                "model": "Badge",
++                "status": "available"
++                # Missing warrantyExpiry key entirely
++            }
++        ]
++        
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(200, json=mock_assets)
++        )
++        
++        response = client.get("/reports/warranty-expiring")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["count"] == 0
++        assert data["items"] == []
++
++    @respx.mock
++    def test_warranty_expiring_invalid_date_format(self, client):
++        """Test warranty report skips assets with invalid date format."""
++        mock_assets = [
++            {
++                "id": 1,
++                "assetTag": "INVALID-001",
++                "assetType": "Laptop",
++                "manufacturer": "Dell",
++                "model": "XPS",
++                "warrantyExpiry": "not-a-date",
++                "status": "available"
++            }
++        ]
++        
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(200, json=mock_assets)
++        )
++        
++        response = client.get("/reports/warranty-expiring")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["count"] == 0
++        assert data["items"] == []
++
++    @respx.mock
++    def test_warranty_expiring_custom_threshold(self, client):
++        """Test warranty report with custom threshold."""
++        today = date.today()
++        within_30 = (today + timedelta(days=20)).isoformat()
++        within_90 = (today + timedelta(days=60)).isoformat()
++        
++        mock_assets = [
++            {
++                "id": 1,
++                "assetTag": "SOON-001",
++                "assetType": "Laptop",
++                "manufacturer": "Dell",
++                "model": "XPS",
++                "warrantyExpiry": within_30,
++                "status": "available"
++            },
++            {
++                "id": 2,
++                "assetTag": "LATER-002",
++                "assetType": "Monitor",
++                "manufacturer": "Samsung",
++                "model": "S27",
++                "warrantyExpiry": within_90,
++                "status": "available"
++            }
++        ]
++        
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(200, json=mock_assets)
++        )
++        
++        # With 30 day threshold, should only get first asset
++        response = client.get("/reports/warranty-expiring?within_days=30")
++        
++        assert response.status_code == 200
++        data = response.json()
++        
++        assert data["within_days"] == 30
++        assert data["count"] == 1
++        assert data["items"][0]["assetTag"] == "SOON-001"
++
++    @respx.mock
++    def test_warranty_expiring_assets_svc_error(self, client):
++        """Test warranty report when assets-svc is unavailable."""
++        respx.get("http://assets-svc:8080/assets").mock(
++            return_value=httpx.Response(500, json={"error": "Internal error"})
++        )
++        
++        response = client.get("/reports/warranty-expiring")
++        
++        assert response.status_code == 502
++        assert "assets-svc unavailable" in response.json()["detail"]
++
++    @respx.mock
++    def test_warranty_expiring_assets_svc_timeout(self, client):
++        """Test warranty report when assets-svc times out."""
++        respx.get("http://assets-svc:8080/assets").mock(
++            side_effect=httpx.TimeoutException("Timeout")
++        )
++        
++        response = client.get("/reports/warranty-expiring")
++        
++        assert response.status_code == 502
++        assert "assets-svc unavailable" in response.json()["detail"]

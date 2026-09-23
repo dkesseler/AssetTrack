@@ -1,0 +1,45 @@
+{
+  "name": "AssetTrack polyglot",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "22"
+    },
+    "ghcr.io/devcontainers/features/dotnet:2": {
+      "version": "10.0"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    },
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "21",
+      "installMaven": true,
+      "mavenVersion": "3.9.6"
+    }
+  },
+  "forwardPorts": [4321, 5001, 5002, 5003, 5004, 5005, 5006],
+  "portsAttributes": {
+    "4321": { "label": "web (Astro)" },
+    "5001": { "label": "assets-svc (.NET)" },
+    "5002": { "label": "workforce-svc (Java 21)" },
+    "5003": { "label": "reporting-svc (Python)" },
+    "5004": { "label": "notifications-svc (Python)" },
+    "5005": { "label": "audit-svc (Java 17)" },
+    "5006": { "label": "auth-svc (Java 17)" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "ms-dotnettools.csdevkit",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "astro-build.astro-vscode",
+        "github.copilot",
+        "github.copilot-chat"
+      ]
+    }
+  },
+  "postCreateCommand": "npm install && npm run install:all && (npm install -g @github/copilot || true)",
+  "remoteUser": "vscode"
+}

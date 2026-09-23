@@ -1,0 +1,20 @@
+{
+  "name": "assettrack-dev",
+  "private": true,
+  "description": "Dev-only orchestrator for running the polyglot AssetTrack stack as plain processes (no Docker). Use `docker compose up` instead if you want the containerized flow.",
+  "scripts": {
+    "dev:web": "cd services/web && ASSETS_SVC_URL=http://localhost:5001 WORKFORCE_SVC_URL=http://localhost:5002 REPORTING_SVC_URL=http://localhost:5003 NOTIFICATIONS_SVC_URL=http://localhost:5004 AUDIT_SVC_URL=http://localhost:5005 AUTH_SVC_URL=http://localhost:5006 DEV_TOKEN_MODE=true npm run dev",
+    "dev:assets": "cd services/assets-svc && mkdir -p data && ASSETS_DB_PATH=$PWD/data/assets.db ASPNETCORE_URLS=http://+:5001 AUTH_JWKS_URL=http://localhost:5006/.well-known/jwks Logging__LogLevel__Default=${LOG_LEVEL_DOTNET:-Warning} dotnet watch run --non-interactive",
+    "dev:workforce": "cd services/workforce-svc && mkdir -p data && SERVER_PORT=5002 WORKFORCE_DB_PATH=$PWD/data/workforce.db AUDIT_SVC_URL=http://localhost:5005 NOTIFICATIONS_SVC_URL=http://localhost:5004 AUTH_JWKS_URL=http://localhost:5006/.well-known/jwks LOGGING_LEVEL_ROOT=${LOG_LEVEL_JAVA:-WARN} mvn -q spring-boot:run",
+    "dev:reporting": "cd services/reporting-svc && mkdir -p data && ASSETS_SVC_URL=http://localhost:5001 WORKFORCE_SVC_URL=http://localhost:5002 uvicorn app.main:app --reload --host 0.0.0.0 --port 5003 --log-level ${LOG_LEVEL_PY:-warning}",
+    "dev:notifications": "cd services/notifications-svc && mkdir -p data && NOTIFICATIONS_DB_PATH=$PWD/data/notifications.db uvicorn app.main:app --reload --host 0.0.0.0 --port 5004 --log-level ${LOG_LEVEL_PY:-warning}",
+    "dev:audit": "cd services/audit-svc && mkdir -p data && SERVER_PORT=5005 AUDIT_DB_PATH=$PWD/data/audit.db LOGGING_LEVEL_ROOT=${LOG_LEVEL_JAVA:-WARN} mvn -q spring-boot:run",
+    "dev:auth": "cd services/auth-svc && mkdir -p data && SERVER_PORT=5006 AUTH_DB_PATH=$PWD/data/auth.db LOGGING_LEVEL_ROOT=${LOG_LEVEL_JAVA:-WARN} mvn -q spring-boot:run",
+    "dev": "node scripts/dev-banner.mjs && concurrently --names web,assets,workforce,reporting,notif,audit,auth --prefix-colors auto --kill-others-on-fail npm:dev:web npm:dev:assets npm:dev:workforce npm:dev:reporting npm:dev:notifications npm:dev:audit npm:dev:auth",
+    "dev:verbose": "LOG_LEVEL_JAVA=INFO LOG_LEVEL_DOTNET=Information LOG_LEVEL_PY=info npm run dev",
+    "install:all": "npm --prefix services/web install && pip install -e services/reporting-svc && pip install -e services/notifications-svc"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

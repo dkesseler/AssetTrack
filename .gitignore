@@ -1,0 +1,52 @@
+# Generic
+.DS_Store
+*.log
+.env
+.env.local
+
+# Node / Astro
+node_modules/
+dist/
+.astro/
+.output/
+
+# .NET
+bin/
+obj/
+*.user
+
+# Java
+target/
+.mvn/wrapper/maven-wrapper.jar
+*.class
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# SQLite databases (each service mounts a volume in compose; local DBs ignored)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+services/*/data/
+!services/*/Data/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+.playwright-mcp/
+
+# .NET incremental build cache
+*.lscache
+dotnet/runfile-discovery/
+
+# Python editable-install metadata
+*.egg-info/
