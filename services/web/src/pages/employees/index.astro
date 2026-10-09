@@ -25,8 +25,8 @@ const departments = ["Engineering", "Marketing", "Finance", "Human Resources", "
   <form method="get" class="card shadow-sm mb-3">
     <div class="card-body row g-3 align-items-end">
       <div class="col-md-4">
-        <label class="form-label small text-secondary mb-1">Department</label>
-        <select name="department" class="form-select form-select-sm">
+        <label for="filter-department" class="form-label small text-secondary mb-1">Department</label>
+        <select id="filter-department" name="department" class="form-select form-select-sm">
           <option value="">All</option>
           {departments.map(d => <option value={d} selected={d === department}>{d}</option>)}
         </select>

@@ -31,22 +31,22 @@ const allStatuses = ["available", "assigned", "retired", "lost"];
   <form method="get" class="card shadow-sm mb-3">
     <div class="card-body row g-3 align-items-end">
       <div class="col-md-3">
-        <label class="form-label small text-secondary mb-1">Type</label>
-        <select name="type" class="form-select form-select-sm">
+        <label for="filter-type" class="form-label small text-secondary mb-1">Type</label>
+        <select id="filter-type" name="type" class="form-select form-select-sm">
           <option value="">Any</option>
           {allTypes.map(t => <option value={t} selected={t === type}>{t}</option>)}
         </select>
       </div>
       <div class="col-md-3">
-        <label class="form-label small text-secondary mb-1">Status</label>
-        <select name="status" class="form-select form-select-sm">
+        <label for="filter-status" class="form-label small text-secondary mb-1">Status</label>
+        <select id="filter-status" name="status" class="form-select form-select-sm">
           <option value="">Any</option>
           {allStatuses.map(s => <option value={s} selected={s === status}>{s}</option>)}
         </select>
       </div>
       <div class="col-md-4">
-        <label class="form-label small text-secondary mb-1">Search tag / manufacturer / model</label>
-        <input type="text" name="q" value={q} class="form-control form-control-sm" />
+        <label for="filter-q" class="form-label small text-secondary mb-1">Search tag / manufacturer / model</label>
+        <input id="filter-q" type="text" name="q" value={q} class="form-control form-control-sm" />
       </div>
       <div class="col-md-2 d-flex gap-2">
         <button class="btn btn-dark btn-sm">Filter</button>
